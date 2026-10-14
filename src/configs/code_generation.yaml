@@ -1,0 +1,42 @@
+defaults:
+  - model: transformer
+  - writer: wandb
+  - metrics: code_generation
+  - datasets: tinysms_train
+  - dataloader: tinysms
+  - transforms: none
+  - optimizer: adamw
+  - lr_scheduler: cosine
+  - data_preparation: tinysms
+  - loss_function: code_generation
+  - _self_
+
+writer:
+  project_name: hw2_code_generation
+  run_name: rope_preln
+
+trainer:
+  log_step: 50
+  n_epochs: 100
+  epoch_len: 500
+  device_tensors:
+    - encoder_input_ids
+    - encoder_attention_mask
+    - decoder_input_ids
+    - decoder_attention_mask
+    - labels
+  monitor: min val_loss
+  max_grad_norm: 1.0
+  resume_from: null
+  device: auto
+  override: false
+  save_period: 5
+  early_stop: ${trainer.n_epochs}
+  save_dir: saved
+  seed: 1
+
+generation_validation:
+  enabled: true
+  every_n_epochs: 5
+  max_examples: 128
+  max_new_tokens: 256

@@ -3,6 +3,7 @@ import warnings
 import hydra
 import torch
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 from src.datasets.data_utils import get_dataloaders
 from src.trainer import Inferencer
@@ -12,7 +13,11 @@ from src.utils.io_utils import ROOT_PATH
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
-@hydra.main(version_base=None, config_path="src/configs", config_name="inference")
+@hydra.main(
+    version_base=None,
+    config_path="src/configs",
+    config_name="code_generation_inference",
+)
 def main(config):
     """
     Main script for inference. Instantiates the model, metrics, and
@@ -34,6 +39,10 @@ def main(config):
     dataloaders, batch_transforms = get_dataloaders(config, device)
 
     # build model architecture, then print to console
+    training_config = OmegaConf.load(config.inferencer.train_config)
+    tokenizer_path = config.model.tokenizer_path
+    config.model = training_config.model
+    config.model.tokenizer_path = tokenizer_path
     model = instantiate(config.model).to(device)
     print(model)
 

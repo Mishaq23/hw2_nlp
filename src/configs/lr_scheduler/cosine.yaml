@@ -1,0 +1,3 @@
+_target_: torch.optim.lr_scheduler.CosineAnnealingLR
+T_max: null # train.py sets n_epochs * steps_per_epoch
+eta_min: 3.0e-6

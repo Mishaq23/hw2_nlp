@@ -46,7 +46,7 @@ class BaseTrainer:
             dataloaders (dict[DataLoader]): dataloaders for different
                 sets of data.
             logger (Logger): logger that logs output.
-            writer (WandBWriter | CometMLWriter): experiment tracker.
+            writer (WandBWriter): experiment tracker.
             epoch_len (int | None): number of steps in each epoch for
                 iteration-based training. If None, use epoch-based
                 training (len(dataloader)).
@@ -122,11 +122,13 @@ class BaseTrainer:
             "grad_norm",
             *[m.name for m in self.metrics["train"]],
             writer=self.writer,
+            transforms={m.name: m.compute for m in self.metrics["train"]},
         )
         self.evaluation_metrics = MetricTracker(
             *self.config.writer.loss_names,
             *[m.name for m in self.metrics["inference"]],
             writer=self.writer,
+            transforms={m.name: m.compute for m in self.metrics["inference"]},
         )
 
         # define checkpoint dir and init everything if required
@@ -350,8 +352,8 @@ class BaseTrainer:
 
     def transform_batch(self, batch):
         """
-        Transforms elements in batch. Like instance transform inside the
-        BaseDataset class, but for the whole batch. Improves pipeline speed,
+        Transforms elements in batch, rather than individual dataset samples.
+        Improves pipeline speed,
         especially if used with a GPU.
 
         Each tensor in a batch undergoes its own transform defined by the key.
@@ -499,7 +501,7 @@ class BaseTrainer:
         """
         resume_path = str(resume_path)
         self.logger.info(f"Loading checkpoint: {resume_path} ...")
-        checkpoint = torch.load(resume_path, self.device)
+        checkpoint = torch.load(resume_path, self.device, weights_only=False)
         self.start_epoch = checkpoint["epoch"] + 1
         self.mnt_best = checkpoint["monitor_best"]
 
@@ -545,7 +547,7 @@ class BaseTrainer:
             self.logger.info(f"Loading model weights from: {pretrained_path} ...")
         else:
             print(f"Loading model weights from: {pretrained_path} ...")
-        checkpoint = torch.load(pretrained_path, self.device)
+        checkpoint = torch.load(pretrained_path, self.device, weights_only=False)
 
         if checkpoint.get("state_dict") is not None:
             self.model.load_state_dict(checkpoint["state_dict"])

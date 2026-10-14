@@ -13,6 +13,17 @@ class BaseMetric:
         """
         self.name = name if name is not None else type(self).__name__
 
+    def weight(self, **batch):
+        """Number of observations represented by a batch metric."""
+        return 1
+
+    def update(self, tracker, **batch):
+        tracker.update(self.name, float(self(**batch)), n=self.weight(**batch))
+
+    def compute(self, average):
+        """Convert the accumulated average into the reported metric."""
+        return average
+
     @abstractmethod
     def __call__(self, **batch):
         """

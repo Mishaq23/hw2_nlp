@@ -1,0 +1,17 @@
+train:
+  - _target_: src.metrics.Perplexity
+    name: perplexity
+    ignore_index: ${loss_function.ignore_index}
+  - _target_: src.metrics.TokenAccuracy
+    name: token_accuracy
+    ignore_index: ${loss_function.ignore_index}
+inference:
+  - _target_: src.metrics.Perplexity
+    name: perplexity
+    ignore_index: ${loss_function.ignore_index}
+  - _target_: src.metrics.TokenAccuracy
+    name: token_accuracy
+    ignore_index: ${loss_function.ignore_index}
+generation:
+  - _target_: src.metrics.SyntaxValidity
+    name: syntax_validity

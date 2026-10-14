@@ -1,7 +1,12 @@
+import json
+from time import perf_counter
+
 import torch
 from tqdm.auto import tqdm
 
+from src.datasets.tokenizer import CodeTokenizer
 from src.metrics.tracker import MetricTracker
+from src.model.generation import greedy_generate
 from src.trainer.base_trainer import BaseTrainer
 
 
@@ -65,6 +70,8 @@ class Inferencer(BaseTrainer):
         # path definition
 
         self.save_path = save_path
+        self.generation = config.inferencer.generation
+        self.tokenizer = CodeTokenizer.from_file(config.model.tokenizer_path)
 
         # define metrics
         self.metrics = metrics
@@ -72,6 +79,7 @@ class Inferencer(BaseTrainer):
             self.evaluation_metrics = MetricTracker(
                 *[m.name for m in self.metrics["inference"]],
                 writer=None,
+                transforms={m.name: m.compute for m in self.metrics["inference"]},
             )
         else:
             self.evaluation_metrics = None
@@ -119,37 +127,22 @@ class Inferencer(BaseTrainer):
         batch = self.move_batch_to_device(batch)
         batch = self.transform_batch(batch)  # transform batch on device -- faster
 
-        outputs = self.model(**batch)
-        batch.update(outputs)
-
+        ids = greedy_generate(
+            self.model,
+            batch["encoder_input_ids"],
+            batch["encoder_attention_mask"],
+            self.generation.max_new_tokens,
+        )
+        batch["generated_code"] = [
+            self.tokenizer.decode(row) for row in ids.cpu().tolist()
+        ]
         if metrics is not None:
             for met in self.metrics["inference"]:
-                metrics.update(met.name, met(**batch))
-
-        # Some saving logic. This is an example
-        # Use if you need to save predictions on disk
-
-        batch_size = batch["logits"].shape[0]
-        current_id = batch_idx * batch_size
-
-        for i in range(batch_size):
-            # clone because of
-            # https://github.com/pytorch/pytorch/issues/1995
-            logits = batch["logits"][i].clone()
-            label = batch["labels"][i].clone()
-            pred_label = logits.argmax(dim=-1)
-
-            output_id = current_id + i
-
-            output = {
-                "pred_label": pred_label,
-                "label": label,
-            }
-
-            if self.save_path is not None:
-                # you can use safetensors or other lib here
-                torch.save(output, self.save_path / part / f"output_{output_id}.pth")
-
+                met.update(metrics, **batch)
+        self.predictions.extend(
+            {"sample_id": sample_id, "code": code}
+            for sample_id, code in zip(batch["sample_id"], batch["generated_code"])
+        )
         return batch
 
     def _inference_part(self, part, dataloader):
@@ -166,11 +159,18 @@ class Inferencer(BaseTrainer):
         self.is_train = False
         self.model.eval()
 
-        self.evaluation_metrics.reset()
+        if self.evaluation_metrics is not None:
+            self.evaluation_metrics.reset()
+        self.predictions = []
 
         # create Save dir
         if self.save_path is not None:
             (self.save_path / part).mkdir(exist_ok=True, parents=True)
+
+        device = torch.device(self.device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        start = perf_counter()
 
         with torch.no_grad():
             for batch_idx, batch in tqdm(
@@ -185,4 +185,22 @@ class Inferencer(BaseTrainer):
                     metrics=self.evaluation_metrics,
                 )
 
-        return self.evaluation_metrics.result()
+        logs = (
+            self.evaluation_metrics.result()
+            if self.evaluation_metrics is not None
+            else {}
+        )
+        self.predictions.sort(key=lambda row: row["sample_id"])
+        if self.save_path is not None:
+            with (self.save_path / part / "predictions.jsonl").open(
+                "w", encoding="utf-8"
+            ) as file:
+                for row in self.predictions:
+                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        logs.update(
+            generation_seconds=perf_counter() - start,
+            generated_examples=len(self.predictions),
+        )
+        return logs

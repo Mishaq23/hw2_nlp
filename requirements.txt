@@ -1,14 +1,19 @@
 torch==2.2.0
-torchvision==0.17.0
-torchmetrics
 numpy==1.26.4
 tqdm
 matplotlib
 pandas
+datasets>=3.2,<4
+# Compatible with the NumPy 1.26 version required by this template.
+pyarrow>=15,<20
+tokenizers>=0.21,<0.22
+ipykernel
+nbformat
+nbclient
 wandb
-comet_ml
 hydra-core
 
 black
 isort
 pre-commit
+pytest

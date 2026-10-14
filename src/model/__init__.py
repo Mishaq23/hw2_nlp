@@ -1,5 +1,5 @@
-from src.model.baseline_model import BaselineModel
+from src.model.transformer import CodeGenerationTransformer
 
 __all__ = [
-    "BaselineModel",
+    "CodeGenerationTransformer",
 ]

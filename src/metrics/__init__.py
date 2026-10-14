@@ -1,1 +1,1 @@
-from src.metrics.example import ExampleMetric
+from src.metrics.code_generation import Perplexity, SyntaxValidity, TokenAccuracy

@@ -1,0 +1,18 @@
+_target_: src.model.CodeGenerationTransformer
+tokenizer_path: ${oc.env:TINYSMS_DATA_DIR,data/processed/tinysms}/tokenizer.json
+# Vocabulary size and special-token IDs come from this saved tokenizer.
+d_model: 256
+n_heads: 4 # d_model / n_heads must be even for RoPE
+n_encoder_layers: 4
+n_decoder_layers: 4
+d_ff: 1024
+dropout: 0.1 # embeddings, FFN hidden states, and residual branches
+attention_dropout: 0.1
+activation: gelu # gelu, relu, or silu
+rope_theta: 10000.0 # RoPE on encoder/decoder self-attention Q/K only
+layer_norm_eps: 1.0e-5 # Pre-LayerNorm plus a final norm in each stack
+bias: true # attention/FFN linear layers and LayerNorm
+share_embeddings: true # encoder and decoder
+tie_output_embedding: true # vocabulary projection and decoder embedding
+scale_embeddings: true # multiply input embeddings by sqrt(d_model)
+init_std: 0.02 # normal initialization for embeddings and linear weights

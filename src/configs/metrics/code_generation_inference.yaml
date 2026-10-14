@@ -1,0 +1,3 @@
+inference:
+  - _target_: src.metrics.SyntaxValidity
+    name: syntax_validity

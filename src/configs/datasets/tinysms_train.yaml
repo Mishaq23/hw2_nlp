@@ -1,0 +1,7 @@
+# Official test has no targets and is used only during generation.
+train:
+  _target_: src.datasets.CodeGenerationDataset
+  data: ${oc.env:TINYSMS_DATA_DIR,data/processed/tinysms}/encoded/train
+val:
+  _target_: src.datasets.CodeGenerationDataset
+  data: ${oc.env:TINYSMS_DATA_DIR,data/processed/tinysms}/encoded/val

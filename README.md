@@ -114,19 +114,115 @@ Installation may depend on your task. The general steps are the following:
 
 ## How To Use
 
+### Code generation data
+
+Start training from the command line; a notebook is optional for analysis:
+
+```bash
+python train.py -cn code_generation
+```
+
+Before training, this uses Hugging Face `load_dataset`, creates train/validation
+groups, trains BPE on train, and saves tokenized Arrow splits. Matching prepared
+data is reused on later runs. Parameters are in
+`src/configs/data_preparation/tinysms.yaml`. The default tokenizer uses up to
+50,000 training examples; `data_preparation.tokenizer_train_rows=null` uses the
+entire training partition. Preparation runs inside `train.py` through
+`src/datasets/preparation.py`.
+
+On Kaggle, choose writable locations for the prepared data and HF cache:
+
+```bash
+export TINYSMS_DATA_DIR=/kaggle/working/tinysms
+python train.py -cn code_generation data_preparation.dataset.cache_dir=/kaggle/working/hf_cache
+```
+
+The `tinysms_train` and `tinysms_test` dataset configs read these saved splits
+through `CodeGenerationDataset` and use the same `TINYSMS_DATA_DIR`. Training
+and inference select their respective dataset config automatically.
+The collate function reads the tokenizer's PAD ID, pads inputs on the right,
+creates boolean attention masks (`true` means a real token), and pads labels
+with `-100`. Test batches contain encoder inputs and original sample IDs.
+For training with the encoder-decoder Transformer, use the dedicated config:
+
+```bash
+python train.py -cn code_generation
+```
+
+This config trains on train and evaluates loss on val; official test has no
+targets and is reserved for generation. AdamW and the cosine scheduler are
+configured in `src/configs/optimizer/adamw.yaml` and
+`src/configs/lr_scheduler/cosine.yaml`. The scheduler updates after each optimizer
+step; by default its period is `n_epochs * steps_per_epoch`, with
+`steps_per_epoch` taken from `trainer.epoch_len` or the train loader length.
+Model hyperparameters are in
+`src/configs/model/transformer.yaml`: dimensions, layer counts, heads, dropout,
+activation, RoPE theta, LayerNorm epsilon, biases, embedding sharing, scaling,
+and initialization. Vocabulary size and special-token IDs come from the saved
+tokenizer. Loss parameters are in `src/configs/loss_function/code_generation.yaml`.
+
+Change hyperparameters directly from the command line, for example:
+
+```bash
+python train.py -cn code_generation model.d_model=384 model.n_heads=6 model.d_ff=1536
+python train.py -cn code_generation model.n_decoder_layers=6 loss_function.label_smoothing=0.1
+```
+
+The model uses Pre-LayerNorm, rotary self-attention in both stacks, and
+cross-attention without RoPE. Its `encode` and `decode_step` methods support
+generation with a reused encoder output and per-layer self/cross-attention K/V
+caches. `decode_step` expects eval mode and unpadded new tokens. The loss is
+mean token cross-entropy with `ignore_index=-100`; targets are already shifted
+by the dataset.
+
+Metrics are configured in `src/configs/metrics/code_generation.yaml`. Loss,
+perplexity, and token accuracy ignore label padding and aggregate by the number
+of target tokens, including EOS. Perplexity is exp(mean NLL) over all evaluated
+tokens and uses unsmoothed cross-entropy even when training uses label smoothing.
+
+Every 5 epochs, validation also greedily generates code for the first 128 val
+examples, with a limit of 256 new tokens per example. It logs `syntax_validity`,
+`generation_seconds`, and `generated_examples`. Syntax checks compile the code
+without executing it and reject empty outputs; valid syntax does not imply a
+correct solution. The timing covers this validation subset, so the 180-second
+T4 test requirement still needs a separate full-test measurement. Change or
+disable this check through `generation_validation`:
+
+```bash
+python train.py -cn code_generation generation_validation.every_n_epochs=10
+python train.py -cn code_generation generation_validation.enabled=false
+```
+
+Pass@1 requires an answer checker and is currently obtained through the
+competition; it is not approximated by syntax validity or token accuracy.
+
 To train a model, run the following command:
 
 ```bash
-python3 train.py -cn=CONFIG_NAME HYDRA_CONFIG_ARGUMENTS
+python train.py HYDRA_CONFIG_ARGUMENTS
 ```
 
-Where `CONFIG_NAME` is a config from `src/configs` and `HYDRA_CONFIG_ARGUMENTS` are optional arguments.
+The default training config is `code_generation`; Hydra arguments override its settings.
 
 To run inference (evaluate the model or save predictions):
 
 ```bash
-python3 inference.py HYDRA_CONFIG_ARGUMENTS
+python inference.py HYDRA_CONFIG_ARGUMENTS
 ```
+
+The default inference config is `code_generation_inference`. To select the trained run:
+
+```bash
+python inference.py inferencer.checkpoint_dir=saved/rope_preln
+```
+
+Each training run saves `tokenizer.json` beside its `config.yaml` and checkpoints.
+Inference reads the trained architecture from that config and uses this
+tokenizer. It performs greedy generation with K/V caches and saves
+`data/saved/code_generation/test/predictions.jsonl`, with one `{sample_id, code}`
+record per test example, sorted by the original sample ID. The last partial
+batch is retained. Syntax validity and full-partition generation time are logged;
+the final competition submission format still depends on the checker instructions.
 
 ## Useful Links:
 

@@ -1,0 +1,3 @@
+test:
+  _target_: src.datasets.CodeGenerationDataset
+  data: ${oc.env:TINYSMS_DATA_DIR,data/processed/tinysms}/encoded/test

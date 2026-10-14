@@ -2,7 +2,6 @@ from itertools import repeat
 
 from hydra.utils import instantiate
 
-from src.datasets.collate import collate_fn
 from src.utils.init_utils import set_worker_seed
 
 
@@ -28,7 +27,7 @@ def move_batch_transforms_to_device(batch_transforms, device):
 
     Batch transforms are required to be an instance of nn.Module.
     If several transforms are applied sequentially, use nn.Sequential
-    in the config (not torchvision.Compose).
+    in the config.
 
     Args:
         batch_transforms (dict[Callable] | None): transforms that
@@ -65,20 +64,23 @@ def get_dataloaders(config, device):
     # dataset partitions init
     datasets = instantiate(config.datasets)  # instance transforms are defined inside
 
+    batch_collate = instantiate(config.dataloader.collate_fn)
+
     # dataloaders init
     dataloaders = {}
     for dataset_partition in config.datasets.keys():
         dataset = datasets[dataset_partition]
 
-        assert config.dataloader.batch_size <= len(dataset), (
-            f"The batch size ({config.dataloader.batch_size}) cannot "
-            f"be larger than the dataset length ({len(dataset)})"
-        )
+        if dataset_partition == "train":
+            assert config.dataloader.batch_size <= len(dataset), (
+                f"The batch size ({config.dataloader.batch_size}) cannot "
+                f"be larger than the training dataset length ({len(dataset)})"
+            )
 
         partition_dataloader = instantiate(
             config.dataloader,
             dataset=dataset,
-            collate_fn=collate_fn,
+            collate_fn=batch_collate,
             drop_last=(dataset_partition == "train"),
             shuffle=(dataset_partition == "train"),
             worker_init_fn=set_worker_seed,

@@ -1,0 +1,20 @@
+enabled: true
+dataset:
+  path: SlavaYus/tinysms_qa_12m
+  revision: b2724689ff079e9c22efd548fe134bfb29036dbb
+  data_files: null
+  cache_dir: ${oc.env:HF_DATASETS_CACHE,data/hf_cache}
+split:
+  validation_fraction: 0.02
+  seed: 42
+  num_proc: null
+tokenizer:
+  vocab_size: 8192
+  min_frequency: 2
+  batch_size: 1000
+  show_progress: true
+tokenizer_train_rows: 50000
+tokenize:
+  batch_size: 1000
+  num_proc: ${data_preparation.split.num_proc}
+output_dir: ${oc.env:TINYSMS_DATA_DIR,data/processed/tinysms}

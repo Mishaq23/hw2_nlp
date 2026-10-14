@@ -1,4 +1,10 @@
+from time import perf_counter
+
+import torch
+
+from src.datasets.tokenizer import CodeTokenizer
 from src.metrics.tracker import MetricTracker
+from src.model.generation import greedy_generate
 from src.trainer.base_trainer import BaseTrainer
 
 
@@ -48,12 +54,65 @@ class Trainer(BaseTrainer):
                 self.lr_scheduler.step()
 
         # update metrics for each loss (in case of multiple losses)
+        loss_weight = 1
+        if batch["labels"].ndim == 2:
+            ignore_index = self.config.loss_function.get("ignore_index", -100)
+            loss_weight = batch["labels"].ne(ignore_index).sum().item()
         for loss_name in self.config.writer.loss_names:
-            metrics.update(loss_name, batch[loss_name].item())
+            metrics.update(loss_name, batch[loss_name].item(), n=loss_weight)
 
         for met in metric_funcs:
-            metrics.update(met.name, met(**batch))
+            met.update(metrics, **batch)
         return batch
+
+    def _evaluation_epoch(self, epoch, part, dataloader):
+        logs = super()._evaluation_epoch(epoch, part, dataloader)
+        config = self.config.get("generation_validation")
+        if config is not None and config.enabled and epoch % config.every_n_epochs == 0:
+            generated_logs = self._evaluate_generation(dataloader, config)
+            logs.update(generated_logs)
+            for name, value in generated_logs.items():
+                self.writer.add_scalar(name, value)
+        return logs
+
+    @torch.no_grad()
+    def _evaluate_generation(self, dataloader, config):
+        metric_funcs = self.metrics["generation"]
+        tracker = MetricTracker(
+            *[m.name for m in metric_funcs],
+            transforms={m.name: m.compute for m in metric_funcs},
+        )
+        tokenizer = CodeTokenizer.from_file(self.config.model.tokenizer_path)
+        device = torch.device(self.device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        start = perf_counter()
+        count = 0
+        for batch in dataloader:
+            size = min(config.max_examples - count, batch["encoder_input_ids"].size(0))
+            if size <= 0:
+                break
+            generated_ids = greedy_generate(
+                self.model,
+                batch["encoder_input_ids"][:size].to(device),
+                batch["encoder_attention_mask"][:size].to(device),
+                config.max_new_tokens,
+            )
+            generated_code = [
+                tokenizer.decode(ids) for ids in generated_ids.cpu().tolist()
+            ]
+            for met in metric_funcs:
+                met.update(tracker, generated_code=generated_code)
+            count += size
+            if count >= config.max_examples:
+                break
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        return {
+            **tracker.result(),
+            "generation_seconds": perf_counter() - start,
+            "generated_examples": count,
+        }
 
     def _log_batch(self, batch_idx, batch, mode="train"):
         """

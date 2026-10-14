@@ -1,0 +1,23 @@
+defaults:
+  - model: transformer
+  - metrics: code_generation_inference
+  - datasets: tinysms_test
+  - dataloader: tinysms
+  - transforms: none
+  - _self_
+
+model:
+  tokenizer_path: ${inferencer.checkpoint_dir}/tokenizer.json
+dataloader:
+  collate_fn:
+    tokenizer_path: ${model.tokenizer_path}
+inferencer:
+  device_tensors: [encoder_input_ids, encoder_attention_mask]
+  device: auto
+  seed: 1
+  checkpoint_dir: saved/rope_preln
+  from_pretrained: ${inferencer.checkpoint_dir}/model_best.pth
+  train_config: ${inferencer.checkpoint_dir}/config.yaml
+  save_path: code_generation
+  generation:
+    max_new_tokens: 256
