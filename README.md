@@ -107,6 +107,12 @@ Installation may depend on your task. The general steps are the following:
    pip install -r requirements.txt
    ```
 
+   On Kaggle/Colab, use the preinstalled CUDA-enabled PyTorch when it satisfies
+   `torch>=2.2,<3`. Install requirements without `--upgrade`; the dependency
+   ranges also allow the NumPy and PyArrow versions supplied by the environment.
+   PyTorch 2.2.0 and NumPy 1.26.4 have no Python 3.13 wheels. Restart the notebook
+   kernel if pip replaced packages that were already imported.
+
 2. Install `pre-commit`:
    ```bash
    pre-commit install
