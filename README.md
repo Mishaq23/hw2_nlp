@@ -210,6 +210,39 @@ python train.py HYDRA_CONFIG_ARGUMENTS
 
 The default training config is `code_generation`; Hydra arguments override its settings.
 
+To log training curves to **Comet Experiment Management**, set `COMET_API_KEY`
+and select the Comet writer. Use your Experiment Management workspace and project;
+an Opik workspace is configured separately.
+
+```bash
+python train.py writer=cometml writer.workspace=YOUR_WORKSPACE \
+  writer.project_name=hw2-generation writer.run_name=exp03_d512_ff2048_20k \
+  model.d_model=512 model.d_ff=2048 model.n_heads=8 \
+  trainer.n_epochs=40 trainer.epoch_len=500 lr_scheduler.T_max=20000
+```
+
+On Kaggle, add a `COMET_API_KEY` secret and read it before launching the script:
+
+```python
+import os
+from kaggle_secrets import UserSecretsClient
+
+os.environ["COMET_API_KEY"] = UserSecretsClient().get_secret("COMET_API_KEY")
+```
+
+The writer records the resolved configuration, train/val metrics, learning rate,
+training speed, and validation generation metrics. Generation checks also log a
+table of up to eight questions, reference programs, and generated programs.
+Open the experiment URL printed at startup, then use **Panels** with the **Step**
+axis to compare runs. Epoch summaries aggregate every training batch; curves
+show logging windows. Public pass@1 is supplied separately by the competition bot.
+
+Comet uses a 32-character run ID saved in the run configuration. With the same
+run name and `trainer.resume_from`, metrics continue in the same experiment.
+The script finishes pending Comet uploads when training exits. To check the
+pipeline without cloud logging, use `writer.mode=offline` or `disabled`;
+offline archives are saved under `saved/comet_offline`.
+
 To run inference (evaluate the model or save predictions):
 
 ```bash

@@ -1,5 +1,6 @@
 from time import perf_counter
 
+import pandas as pd
 import torch
 
 from src.datasets.tokenizer import CodeTokenizer
@@ -88,6 +89,7 @@ class Trainer(BaseTrainer):
             torch.cuda.synchronize(device)
         start = perf_counter()
         count = 0
+        examples = []
         for batch in dataloader:
             size = min(config.max_examples - count, batch["encoder_input_ids"].size(0))
             if size <= 0:
@@ -103,16 +105,33 @@ class Trainer(BaseTrainer):
             ]
             for met in metric_funcs:
                 met.update(tracker, generated_code=generated_code)
+            for index in range(min(size, 8 - len(examples))):
+                labels = batch["labels"][index]
+                ignore_index = self.config.loss_function.get("ignore_index", -100)
+                examples.append(
+                    {
+                        "sample_id": batch["sample_id"][index],
+                        "question": tokenizer.decode(
+                            batch["encoder_input_ids"][index].tolist()
+                        ),
+                        "reference_code": tokenizer.decode(
+                            labels[labels.ne(ignore_index)].tolist()
+                        ),
+                        "generated_code": generated_code[index],
+                    }
+                )
             count += size
             if count >= config.max_examples:
                 break
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        return {
+        logs = {
             **tracker.result(),
             "generation_seconds": perf_counter() - start,
             "generated_examples": count,
         }
+        self.writer.add_table("generation_examples", pd.DataFrame(examples))
+        return logs
 
     def _log_batch(self, batch_idx, batch, mode="train"):
         """

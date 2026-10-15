@@ -45,8 +45,8 @@ def main(config):
         )
         config.lr_scheduler.T_max = config.trainer.n_epochs * steps_per_epoch
 
-    project_config = OmegaConf.to_container(config)
     logger = setup_saving_and_logging(config)
+    project_config = OmegaConf.to_container(config, resolve=True)
     writer = instantiate(config.writer, logger, project_config)
     if config.get("data_preparation") is not None:
         run_dir = ROOT_PATH / config.trainer.save_dir / config.writer.run_name
@@ -81,7 +81,12 @@ def main(config):
         skip_oom=config.trainer.get("skip_oom", True),
     )
 
-    trainer.train()
+    try:
+        trainer.train()
+    finally:
+        finish = getattr(writer, "finish", None)
+        if finish is not None:
+            finish()
 
 
 if __name__ == "__main__":

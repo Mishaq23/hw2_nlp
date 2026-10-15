@@ -202,6 +202,9 @@ class BaseTrainer:
         self.is_train = True
         self.model.train()
         self.train_metrics.reset()
+        epoch_metrics = MetricTracker(
+            *self.train_metrics.keys(), transforms=self.train_metrics.transforms
+        )
         self.writer.set_step((epoch - 1) * self.epoch_len)
         self.writer.add_scalar("epoch", epoch)
         for batch_idx, batch in enumerate(
@@ -223,8 +226,8 @@ class BaseTrainer:
             self.train_metrics.update("grad_norm", self._get_grad_norm())
 
             # log current results
-            if batch_idx % self.log_step == 0:
-                self.writer.set_step((epoch - 1) * self.epoch_len + batch_idx)
+            if (batch_idx + 1) % self.log_step == 0 or batch_idx + 1 >= self.epoch_len:
+                self.writer.set_step((epoch - 1) * self.epoch_len + batch_idx + 1)
                 self.logger.debug(
                     "Train Epoch: {} {} Loss: {:.6f}".format(
                         epoch, self._progress(batch_idx), batch["loss"].item()
@@ -235,14 +238,14 @@ class BaseTrainer:
                 )
                 self._log_scalars(self.train_metrics)
                 self._log_batch(batch_idx, batch)
-                # we don't want to reset train metrics at the start of every epoch
-                # because we are interested in recent train metrics
-                last_train_metrics = self.train_metrics.result()
+                epoch_metrics.merge(self.train_metrics)
                 self.train_metrics.reset()
             if batch_idx + 1 >= self.epoch_len:
                 break
 
-        logs = last_train_metrics
+        # Include a remaining window if the final batch was skipped after OOM.
+        epoch_metrics.merge(self.train_metrics)
+        logs = epoch_metrics.result()
 
         # Run val/test
         for part, dataloader in self.evaluation_dataloaders.items():

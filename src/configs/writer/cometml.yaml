@@ -1,0 +1,9 @@
+_target_: src.logger.CometMLWriter
+project_name: hw2-generation
+workspace: ${oc.env:COMET_WORKSPACE,null}
+run_name: testing
+mode: online
+loss_names: [loss]
+log_checkpoints: false
+id_length: 32
+offline_directory: saved/comet_offline

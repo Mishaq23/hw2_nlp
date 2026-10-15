@@ -60,6 +60,13 @@ class MetricTracker:
             value = self.transforms[key](value)
         return float(value)
 
+    def merge(self, other):
+        """Combine untransformed totals, e.g. logging windows into an epoch."""
+        self._data[["total", "counts"]] += other._data[["total", "counts"]]
+        self._data["average"] = (
+            self._data["total"] / self._data["counts"].replace(0, float("nan"))
+        ).fillna(0.0)
+
     def result(self):
         """
         Return average value of each metric.
