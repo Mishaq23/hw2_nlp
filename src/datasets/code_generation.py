@@ -1,5 +1,7 @@
 """Cached, unpadded seq2seq examples; batching belongs to collate_fn."""
 
+import hashlib
+import json
 from pathlib import Path
 
 import torch
@@ -8,6 +10,14 @@ from torch.utils.data import Dataset
 from datasets import Dataset as ArrowDataset
 from datasets import Features, Sequence, Value, load_from_disk
 from src.datasets.tokenizer import CodeTokenizer
+
+
+def dataset_digest(data):
+    """Content identity for small fixed splits, stable across Arrow save/load."""
+    digest = hashlib.sha256()
+    for batch in data.iter(batch_size=256):
+        digest.update(json.dumps(batch, sort_keys=True, separators=(",", ":")).encode())
+    return digest.hexdigest()
 
 
 def tokenize_dataset(

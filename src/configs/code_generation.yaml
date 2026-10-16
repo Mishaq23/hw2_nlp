@@ -28,6 +28,10 @@ trainer:
   monitor: min val_loss
   max_grad_norm: 1.0
   resume_from: null
+  resume_model_config: true # restore architecture from any full checkpoint
+  reset_scheduler: false # true once when starting a new LR cycle
+  reset_data_state: false # true when deliberately switching shard groups/batching
+  max_epochs_per_session: null # stop cleanly after this many logging windows
   device: auto
   override: false
   save_period: 5

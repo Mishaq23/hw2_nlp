@@ -1,7 +1,10 @@
 from itertools import repeat
 
+import torch
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
+from src.datasets.sampler import ResumableBatchSampler
 from src.utils.init_utils import set_worker_seed
 
 
@@ -77,14 +80,23 @@ def get_dataloaders(config, device):
                 f"be larger than the training dataset length ({len(dataset)})"
             )
 
-        partition_dataloader = instantiate(
-            config.dataloader,
+        loader_config = OmegaConf.to_container(config.dataloader, resolve=True)
+        # A separate generator keeps worker startup from consuming model RNG.
+        seed = config.get("trainer", config.get("inferencer", {})).get("seed", 0)
+        kwargs = dict(
             dataset=dataset,
             collate_fn=batch_collate,
-            drop_last=(dataset_partition == "train"),
-            shuffle=(dataset_partition == "train"),
             worker_init_fn=set_worker_seed,
+            generator=torch.Generator().manual_seed(seed),
         )
+        if dataset_partition == "train":
+            batch_size = loader_config.pop("batch_size")
+            loader_config.pop("shuffle", None)
+            loader_config.pop("drop_last", None)
+            kwargs["batch_sampler"] = ResumableBatchSampler(dataset, batch_size, seed)
+        else:
+            kwargs.update(drop_last=False, shuffle=False)
+        partition_dataloader = instantiate(loader_config, **kwargs)
         dataloaders[dataset_partition] = partition_dataloader
 
     return dataloaders, batch_transforms

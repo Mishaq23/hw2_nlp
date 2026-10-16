@@ -1,4 +1,6 @@
 enabled: true
+pretrained_tokenizer_path: null # reuse token IDs when continuing trained weights
+validation_path: null # saved raw or encoded validation split from an earlier stage
 dataset:
   path: SlavaYus/tinysms_qa_12m
   revision: b2724689ff079e9c22efd548fe134bfb29036dbb

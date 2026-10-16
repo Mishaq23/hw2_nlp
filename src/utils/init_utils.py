@@ -111,11 +111,16 @@ def saving_init(save_dir, config):
             logs, checkpoints, config, etc.
         config (DictConfig): hydra config for the current experiment.
     """
-    run_id = None
+    run_id = (
+        config.writer.get("run_id")
+        if config.trainer.get("resume_from") is not None
+        else None
+    )
 
     if save_dir.exists():
         if config.trainer.get("resume_from") is not None:
-            run_id = resume_config(save_dir)
+            if run_id is None:
+                run_id = resume_config(save_dir)
         elif config.trainer.override:
             print(f"Overriding save directory '{save_dir}'...")
             shutil.rmtree(str(save_dir))

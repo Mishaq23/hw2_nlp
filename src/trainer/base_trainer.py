@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from itertools import islice
 
 import torch
 from numpy import inf
@@ -6,7 +7,9 @@ from torch.nn.utils import clip_grad_norm_
 from tqdm.auto import tqdm
 
 from src.datasets.data_utils import inf_loop
+from src.datasets.tokenizer import tokenizer_digest
 from src.metrics.tracker import MetricTracker
+from src.utils.checkpoint import atomic_save, dataset_identity, restore_rng, rng_state
 from src.utils.io_utils import ROOT_PATH
 
 
@@ -30,6 +33,7 @@ class BaseTrainer:
         epoch_len=None,
         skip_oom=True,
         batch_transforms=None,
+        resume_checkpoint=None,
     ):
         """
         Args:
@@ -73,7 +77,9 @@ class BaseTrainer:
         self.batch_transforms = batch_transforms
 
         # define dataloaders
-        self.train_dataloader = dataloaders["train"]
+        self.train_loader = dataloaders["train"]
+        self.train_batch_sampler = self.train_loader.batch_sampler
+        self.train_dataloader = self.train_loader
         if epoch_len is None:
             # epoch-based training
             self.epoch_len = len(self.train_dataloader)
@@ -88,6 +94,13 @@ class BaseTrainer:
 
         # define epochs
         self._last_epoch = 0  # required for saving on interruption
+        self._epoch_complete = True
+        self._epoch_step = 0
+        self.global_step = 0
+        self.not_improved_count = 0
+        self.max_epochs_per_session = self.cfg_trainer.get("max_epochs_per_session")
+        if self.max_epochs_per_session is not None and self.max_epochs_per_session < 1:
+            raise ValueError("max_epochs_per_session must be positive or null.")
         self.start_epoch = 1
         self.epochs = self.cfg_trainer.n_epochs
 
@@ -130,6 +143,9 @@ class BaseTrainer:
             writer=self.writer,
             transforms={m.name: m.compute for m in self.metrics["inference"]},
         )
+        self.epoch_metrics = MetricTracker(
+            *self.train_metrics.keys(), transforms=self.train_metrics.transforms
+        )
 
         # define checkpoint dir and init everything if required
 
@@ -139,7 +155,7 @@ class BaseTrainer:
 
         if config.trainer.get("resume_from") is not None:
             resume_path = self.checkpoint_dir / config.trainer.resume_from
-            self._resume_checkpoint(resume_path)
+            self._resume_checkpoint(resume_path, resume_checkpoint)
 
         if config.trainer.get("from_pretrained") is not None:
             self._from_pretrained(config.trainer.get("from_pretrained"))
@@ -152,8 +168,11 @@ class BaseTrainer:
             self._train_process()
         except KeyboardInterrupt as e:
             self.logger.info("Saving model on keyboard interrupt")
-            self._save_checkpoint(self._last_epoch, save_best=False)
+            self._save_checkpoint(self._last_epoch, last_only=True)
             raise e
+        finally:
+            if hasattr(self.train_dataloader, "close"):
+                self.train_dataloader.close()
 
     def _train_process(self):
         """
@@ -163,9 +182,14 @@ class BaseTrainer:
         and monitoring the performance improvement (for early stopping
         and saving the best checkpoint).
         """
-        not_improved_count = 0
+        session_epochs = 0
         for epoch in range(self.start_epoch, self.epochs + 1):
+            if epoch != self.start_epoch or self._epoch_complete:
+                self._epoch_step = 0
+                self.train_metrics.reset()
+                self.epoch_metrics.reset()
             self._last_epoch = epoch
+            self._epoch_complete = False
             result = self._train_epoch(epoch)
 
             # save logged information into logs dict
@@ -178,14 +202,22 @@ class BaseTrainer:
 
             # evaluate model performance according to configured metric,
             # save best checkpoint as model_best
-            best, stop_process, not_improved_count = self._monitor_performance(
-                logs, not_improved_count
+            best, stop_process, self.not_improved_count = self._monitor_performance(
+                logs, self.not_improved_count
             )
-
-            if epoch % self.save_period == 0 or best:
-                self._save_checkpoint(epoch, save_best=best, only_best=True)
+            self._epoch_complete = True
+            self._save_checkpoint(epoch, save_best=best, only_best=True)
+            session_epochs += 1
 
             if stop_process:  # early_stop
+                break
+            if (
+                self.max_epochs_per_session is not None
+                and session_epochs >= self.max_epochs_per_session
+            ):
+                self.logger.info(
+                    "Session limit reached; continue from checkpoint-last.pth."
+                )
                 break
 
     def _train_epoch(self, epoch):
@@ -201,15 +233,19 @@ class BaseTrainer:
         """
         self.is_train = True
         self.model.train()
-        self.train_metrics.reset()
-        epoch_metrics = MetricTracker(
-            *self.train_metrics.keys(), transforms=self.train_metrics.transforms
-        )
-        self.writer.set_step((epoch - 1) * self.epoch_len)
+        self.writer.set_step(self.global_step)
         self.writer.add_scalar("epoch", epoch)
         for batch_idx, batch in enumerate(
-            tqdm(self.train_dataloader, desc="train", total=self.epoch_len)
+            tqdm(
+                islice(self.train_dataloader, self.epoch_len - self._epoch_step),
+                desc="train",
+                total=self.epoch_len,
+                initial=self._epoch_step,
+            ),
+            start=self._epoch_step,
         ):
+            if batch_idx >= self.epoch_len:
+                break
             try:
                 batch = self.process_batch(
                     batch,
@@ -219,15 +255,22 @@ class BaseTrainer:
                 if self.skip_oom:
                     self.logger.warning("OOM on batch. Skipping batch.")
                     torch.cuda.empty_cache()  # free some memory
+                    self._mark_batch_consumed()
+                    self._epoch_step = batch_idx + 1
+                    if self._epoch_step >= self.epoch_len:
+                        break
                     continue
                 else:
                     raise e
 
+            self._mark_batch_consumed()
+            self.global_step += 1
+            self._epoch_step = batch_idx + 1
             self.train_metrics.update("grad_norm", self._get_grad_norm())
 
             # log current results
             if (batch_idx + 1) % self.log_step == 0 or batch_idx + 1 >= self.epoch_len:
-                self.writer.set_step((epoch - 1) * self.epoch_len + batch_idx + 1)
+                self.writer.set_step(self.global_step)
                 self.logger.debug(
                     "Train Epoch: {} {} Loss: {:.6f}".format(
                         epoch, self._progress(batch_idx), batch["loss"].item()
@@ -238,14 +281,21 @@ class BaseTrainer:
                 )
                 self._log_scalars(self.train_metrics)
                 self._log_batch(batch_idx, batch)
-                epoch_metrics.merge(self.train_metrics)
+                self.epoch_metrics.merge(self.train_metrics)
                 self.train_metrics.reset()
             if batch_idx + 1 >= self.epoch_len:
                 break
 
         # Include a remaining window if the final batch was skipped after OOM.
-        epoch_metrics.merge(self.train_metrics)
-        logs = epoch_metrics.result()
+        self.epoch_metrics.merge(self.train_metrics)
+        self.train_metrics.reset()
+        logs = self.epoch_metrics.result()
+        if hasattr(self.train_batch_sampler, "pass_index"):
+            sampler = self.train_batch_sampler
+            logs["data_passes"] = sampler.pass_index + (
+                sampler.batch_offset * sampler.batch_size / sampler.size
+            )
+            self.writer.add_scalar("data_passes", logs["data_passes"])
 
         # Run val/test
         for part, dataloader in self.evaluation_dataloaders.items():
@@ -253,6 +303,10 @@ class BaseTrainer:
             logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
 
         return logs
+
+    def _mark_batch_consumed(self):
+        if hasattr(self.train_batch_sampler, "mark_consumed"):
+            self.train_batch_sampler.mark_consumed()
 
     def _evaluation_epoch(self, epoch, part, dataloader):
         """
@@ -278,7 +332,7 @@ class BaseTrainer:
                     batch,
                     metrics=self.evaluation_metrics,
                 )
-            self.writer.set_step(epoch * self.epoch_len, part)
+            self.writer.set_step(self.global_step, part)
             self._log_scalars(self.evaluation_metrics)
             self._log_batch(
                 batch_idx, batch, part
@@ -456,7 +510,9 @@ class BaseTrainer:
         for metric_name in metric_tracker.keys():
             self.writer.add_scalar(f"{metric_name}", metric_tracker.avg(metric_name))
 
-    def _save_checkpoint(self, epoch, save_best=False, only_best=False):
+    def _save_checkpoint(
+        self, epoch, save_best=False, only_best=False, last_only=False
+    ):
         """
         Save the checkpoints.
 
@@ -476,59 +532,144 @@ class BaseTrainer:
             "lr_scheduler": self.lr_scheduler.state_dict(),
             "monitor_best": self.mnt_best,
             "config": self.config,
+            "global_step": self.global_step,
+            "epoch_len": self.epoch_len,
+            "epoch_complete": self._epoch_complete,
+            "epoch_step": self._epoch_step,
+            "not_improved_count": self.not_improved_count,
+            "rng_state": rng_state(),
+            "data_state": (
+                self.train_batch_sampler.state_dict()
+                if hasattr(self.train_batch_sampler, "state_dict")
+                else None
+            ),
+            "validation_identity": (
+                dataset_identity(self.evaluation_dataloaders["val"].dataset)
+                if "val" in self.evaluation_dataloaders
+                else None
+            ),
+            "train_metrics": self.train_metrics.state_dict(),
+            "epoch_metrics": self.epoch_metrics.state_dict(),
+            "tokenizer_sha256": (
+                tokenizer_digest(self.config.model.tokenizer_path)
+                if self.config.model.get("tokenizer_path") is not None
+                else None
+            ),
         }
+        atomic_save(state, self.checkpoint_dir / "checkpoint-last.pth")
+        if last_only:
+            return
         filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}.pth")
-        if not (only_best and save_best):
-            torch.save(state, filename)
+        if (
+            self.save_period > 0
+            and epoch % self.save_period == 0
+            and not (only_best and save_best)
+        ):
+            atomic_save(state, filename)
             if self.config.writer.log_checkpoints:
                 self.writer.add_checkpoint(filename, str(self.checkpoint_dir.parent))
             self.logger.info(f"Saving checkpoint: {filename} ...")
         if save_best:
             best_path = str(self.checkpoint_dir / "model_best.pth")
-            torch.save(state, best_path)
+            atomic_save(state, best_path)
             if self.config.writer.log_checkpoints:
                 self.writer.add_checkpoint(best_path, str(self.checkpoint_dir.parent))
             self.logger.info("Saving current best: model_best.pth ...")
 
-    def _resume_checkpoint(self, resume_path):
+    def _resume_checkpoint(self, resume_path, checkpoint=None):
         """
         Resume from a saved checkpoint (in case of server crash, etc.).
         The function loads state dicts for everything, including model,
         optimizers, etc.
 
-        Notice that the checkpoint should be located in the current experiment
-        saved directory (where all checkpoints are saved in '_save_checkpoint').
+        A checkpoint may come from the current run or a previous session's
+        mounted output directory.
 
         Args:
             resume_path (str): Path to the checkpoint to be resumed.
         """
         resume_path = str(resume_path)
         self.logger.info(f"Loading checkpoint: {resume_path} ...")
-        checkpoint = torch.load(resume_path, self.device, weights_only=False)
-        self.start_epoch = checkpoint["epoch"] + 1
+        if checkpoint is None:
+            checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        saved_epoch_len = checkpoint.get(
+            "epoch_len", checkpoint["config"]["trainer"].get("epoch_len")
+        )
+        if saved_epoch_len is not None and saved_epoch_len != self.epoch_len:
+            raise ValueError("Keep trainer.epoch_len unchanged when resuming.")
+        self._epoch_complete = checkpoint.get("epoch_complete", True)
+        self.start_epoch = checkpoint["epoch"] + int(self._epoch_complete)
+        self._epoch_step = (
+            0 if self._epoch_complete else checkpoint.get("epoch_step", 0)
+        )
+        self.global_step = checkpoint.get(
+            "global_step", checkpoint["epoch"] * self.epoch_len
+        )
+        self.not_improved_count = checkpoint.get("not_improved_count", 0)
         self.mnt_best = checkpoint["monitor_best"]
 
-        # load architecture params from checkpoint.
-        if checkpoint["config"]["model"] != self.config["model"]:
+        saved_model = dict(checkpoint["config"]["model"])
+        current_model = dict(self.config.model)
+        saved_model.pop("tokenizer_path", None)
+        current_model.pop("tokenizer_path", None)
+        if saved_model != current_model:
             self.logger.warning(
-                "Warning: Architecture configuration given in the config file is different from that "
-                "of the checkpoint. This may yield an exception when state_dict is loaded."
+                "Model configuration changed; checkpoint weights must remain compatible."
             )
         self.model.load_state_dict(checkpoint["state_dict"])
 
-        # load optimizer state from checkpoint only when optimizer type is not changed.
-        if (
-            checkpoint["config"]["optimizer"] != self.config["optimizer"]
-            or checkpoint["config"]["lr_scheduler"] != self.config["lr_scheduler"]
-        ):
-            self.logger.warning(
-                "Warning: Optimizer or lr_scheduler given in the config file is different "
-                "from that of the checkpoint. Optimizer and scheduler parameters "
-                "are not resumed."
+        saved_optimizer = dict(checkpoint["config"]["optimizer"])
+        current_optimizer = dict(self.config.optimizer)
+        reset_scheduler = self.cfg_trainer.get("reset_scheduler", False)
+        if reset_scheduler:
+            saved_optimizer.pop("lr", None)
+            current_optimizer.pop("lr", None)
+        if saved_optimizer != current_optimizer:
+            raise ValueError(
+                "Optimizer configuration changed; use from_pretrained for weights only."
+            )
+        configured_lrs = [group["lr"] for group in self.optimizer.param_groups]
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if reset_scheduler:
+            for group, lr in zip(self.optimizer.param_groups, configured_lrs):
+                group["lr"] = group["initial_lr"] = lr
+            self.logger.info(
+                "Optimizer restored; starting the configured new LR cycle."
+            )
+        elif checkpoint["config"]["lr_scheduler"] != self.config.lr_scheduler:
+            raise ValueError(
+                "Scheduler changed; set trainer.reset_scheduler=true for a new LR cycle."
             )
         else:
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+
+        validation = (
+            dataset_identity(self.evaluation_dataloaders["val"].dataset)
+            if "val" in self.evaluation_dataloaders
+            else None
+        )
+        if checkpoint.get("validation_identity") != validation:
+            self.mnt_best = inf if self.mnt_mode == "min" else -inf
+            self.not_improved_count = 0
+            self.logger.warning(
+                "Validation changed or is unknown; resetting best metric."
+            )
+        if not self.cfg_trainer.get("reset_data_state", False):
+            if checkpoint.get("data_state") is not None:
+                self.train_batch_sampler.load_state_dict(checkpoint["data_state"])
+            else:
+                self.logger.warning(
+                    "Legacy checkpoint has no data cursor; starting a new data pass."
+                )
+            if not self._epoch_complete:
+                self.train_metrics.load_state_dict(checkpoint["train_metrics"])
+                self.epoch_metrics.load_state_dict(checkpoint["epoch_metrics"])
+        elif not self._epoch_complete:
+            raise ValueError(
+                "Finish the current training window before switching data groups."
+            )
+        if checkpoint.get("rng_state") is not None:
+            restore_rng(checkpoint["rng_state"])
 
         self.logger.info(
             f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
