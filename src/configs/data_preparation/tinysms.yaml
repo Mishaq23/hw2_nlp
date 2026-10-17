@@ -2,8 +2,14 @@ enabled: true
 dataset:
   path: SlavaYus/tinysms_qa_12m
   revision: b2724689ff079e9c22efd548fe134bfb29036dbb
-  data_files: null
+  data_files:
+    train: data/train/*.parquet
+    test: data/test/test.parquet
   cache_dir: ${oc.env:HF_DATASETS_CACHE,data/hf_cache}
+sampling:
+  max_rows: 1200000 # before filtering and train/validation splitting; null: full data
+  seed: 42
+  batch_size: 4096 # source rows read per batch, independent of model batch size
 split:
   validation_fraction: 0.02
   seed: 42

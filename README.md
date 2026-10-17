@@ -128,13 +128,40 @@ Start training from the command line; a notebook is optional for analysis:
 python train.py -cn code_generation
 ```
 
-Before training, this uses Hugging Face `load_dataset`, creates train/validation
+Before training, this samples Parquet files from Hugging Face, creates train/validation
 groups, trains BPE on train, and saves tokenized Arrow splits. Matching prepared
 data is reused on later runs. Parameters are in
 `src/configs/data_preparation/tinysms.yaml`. The default tokenizer uses up to
 50,000 training examples; `data_preparation.tokenizer_train_rows=null` uses the
 entire training partition. Preparation runs inside `train.py` through
 `src/datasets/preparation.py`.
+
+By default, preparation selects **1,200,000 source rows across all training
+shards**, with quotas proportional to each file's row count. It samples row
+indices without replacement using a fixed seed, then reads each remote file
+in batches and writes only selected rows to a temporary Parquet file. The full
+source corpus is never saved to the local HF cache. Source files still have to
+be read; sampling saves disk space and tokenization work, not necessarily
+download traffic. The temporary sample and preparation caches are removed after
+the final Arrow splits and tokenizer are saved.
+
+Configure the sample independently of model hyperparameters:
+
+```bash
+python train.py -cn code_generation data_preparation.sampling.max_rows=1200000 data_preparation.sampling.seed=42 data_preparation.sampling.batch_size=4096
+```
+
+`sampling.batch_size` controls source reading, not the training batch size.
+The row limit applies **before** empty-text filtering, test-question exclusion,
+and train/validation splitting; the final train count is slightly smaller.
+`metadata.json` records source and sampled row counts for every shard, plus
+the final split sizes. The existing loader shuffles the combined local sample
+for training; it continues the same traversal between 500-step logging windows.
+Read buffers are bounded by the current Parquet file/batches, not the corpus.
+Set `data_preparation.sampling.max_rows=null` to use the previous full-loading
+path, including its normal HF cache. An explicit `dataset.data_files` override
+limits sampling to those files. Local Parquet files are supported with
+`data_preparation.dataset.path=parquet` and a train/test `data_files` mapping.
 
 On Kaggle, choose writable locations for the prepared data and HF cache:
 
