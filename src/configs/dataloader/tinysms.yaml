@@ -4,4 +4,4 @@ num_workers: 2
 pin_memory: true
 collate_fn:
   _target_: src.datasets.collate.make_code_generation_collate
-  tokenizer_path: ${model.tokenizer_path}
+  tokenizer_path: ${oc.env:TINYSMS_DATA_DIR,data/processed/tinysms}/tokenizer.json

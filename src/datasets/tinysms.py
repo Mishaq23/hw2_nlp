@@ -2,7 +2,7 @@
 
 import hashlib
 
-from datasets import Dataset, DatasetDict
+from datasets import DatasetDict
 
 DATASET_ID = "SlavaYus/tinysms_qa_12m"
 DATASET_REVISION = "b2724689ff079e9c22efd548fe134bfb29036dbb"
@@ -18,7 +18,6 @@ def prepare_raw_splits(
     validation_fraction: float = 0.02,
     seed: int = 42,
     num_proc: int | None = None,
-    validation_data: Dataset | None = None,
 ) -> DatasetDict:
     """Filter missing training texts and hold out whole question groups.
 
@@ -38,19 +37,6 @@ def prepare_raw_splits(
         raise ValueError("Test contains missing questions; do not silently drop rows.")
 
     heldout_questions = {question_key(q) for q in raw["test"]["question"]}
-    if validation_data is not None:
-        if not {"question", "code"}.issubset(validation_data.column_names):
-            raise ValueError("Fixed validation must contain question and code.")
-        if any(
-            not _nonempty_text(row["question"])
-            or not _nonempty_text(row["code"])
-            or question_key(row["question"]) in heldout_questions
-            for row in validation_data
-        ):
-            raise ValueError(
-                "Fixed validation contains invalid rows or official test questions."
-            )
-        heldout_questions.update(question_key(q) for q in validation_data["question"])
     train = raw["train"].map(
         lambda _, indices: {"sample_id": indices},
         batched=True,
@@ -91,20 +77,13 @@ def prepare_raw_splits(
     )
     partitions = {}
     for name, is_validation in (("train", False), ("val", True)):
-        if name == "val" and validation_data is not None:
-            partitions[name] = validation_data
-            if "sample_id" not in validation_data.column_names:
-                partitions[name] = validation_data.add_column(
-                    "sample_id", list(range(len(validation_data)))
-                )
-        else:
-            partitions[name] = grouped.filter(
-                lambda flags: [flag == is_validation for flag in flags],
-                input_columns=["_validation"],
-                batched=True,
-                num_proc=num_proc,
-                desc=f"Select {name}",
-            ).remove_columns("_validation")
+        partitions[name] = grouped.filter(
+            lambda flags: [flag == is_validation for flag in flags],
+            input_columns=["_validation"],
+            batched=True,
+            num_proc=num_proc,
+            desc=f"Select {name}",
+        ).remove_columns("_validation")
         if not len(partitions[name]):
             raise ValueError(
                 f"{name} is empty. Use more examples or another validation_fraction."

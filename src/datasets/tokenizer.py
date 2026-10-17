@@ -1,6 +1,5 @@
 """A shared, lossless byte-level BPE tokenizer for questions and Python code."""
 
-import hashlib
 from pathlib import Path
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
@@ -8,10 +7,6 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from datasets import Dataset as ArrowDataset
 
 SPECIAL_TOKENS = ["<|pad|>", "<|bos|>", "<|eos|>", "<|unk|>"]
-
-
-def tokenizer_digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class CodeTokenizer:

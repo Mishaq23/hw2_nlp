@@ -77,12 +77,6 @@ class MetricTracker:
         """
         return {key: self.avg(key) for key in self.keys()}
 
-    def state_dict(self):
-        return self._data.to_dict()
-
-    def load_state_dict(self, state):
-        self._data.loc[:, :] = pd.DataFrame(state).reindex(self._data.index)
-
     def keys(self):
         """
         Return all metric names defined in the MetricTracker.
