@@ -1,0 +1,48 @@
+defaults:
+  - code_generation
+  - override /writer: cometml
+  - _self_
+
+writer:
+  run_name: exp07_swiglu56m_b32_50k
+  workspace: hw2-generation
+  project_name: hw2-generation
+
+model:
+  d_model: 512
+  d_ff: 1792
+  activation: swiglu
+  n_heads: 8
+  n_encoder_layers: 6
+  n_decoder_layers: 6
+  dropout: 0.1
+  attention_dropout: 0.1
+
+trainer:
+  n_epochs: 100
+  epoch_len: 500
+  save_period: 100
+  monitor: max val_pass_at_1
+  skip_oom: false
+
+dataloader:
+  batch_size: 32
+  num_workers: 2
+
+data_preparation:
+  sampling:
+    max_rows: 1200000
+    seed: 42
+  split:
+    validation_fraction: 0.0025
+    seed: 42
+    num_proc: 2
+
+generation_validation:
+  num_beams: [1, 3]
+  length_penalty: 1.0
+  batch_size: 16
+  max_examples: 512
+  seed: 42
+  every_n_epochs: 5
+  max_new_tokens: 256

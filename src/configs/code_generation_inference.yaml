@@ -21,3 +21,5 @@ inferencer:
   save_path: code_generation
   generation:
     max_new_tokens: 256
+    num_beams: null # null: use checkpoint's selected decoding; old checkpoints: greedy
+    length_penalty: null # null: use checkpoint's value; old checkpoints: 1.0

@@ -25,7 +25,7 @@ trainer:
     - decoder_input_ids
     - decoder_attention_mask
     - labels
-  monitor: min val_loss
+  monitor: max val_pass_at_1
   max_grad_norm: 1.0
   resume_from: null
   device: auto
@@ -38,5 +38,9 @@ trainer:
 generation_validation:
   enabled: true
   every_n_epochs: 5
-  max_examples: 128
+  max_examples: 512
+  seed: 42 # fixed random subset, independent of model RNG
   max_new_tokens: 256
+  num_beams: [1] # exp07 compares [1, 3] on exactly the same validation questions
+  length_penalty: 1.0 # beam score: sum(log probabilities) / generated_length**penalty
+  batch_size: null # null: use dataloader.batch_size; independent of training batch

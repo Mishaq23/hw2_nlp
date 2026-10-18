@@ -15,3 +15,10 @@ inference:
 generation:
   - _target_: src.metrics.SyntaxValidity
     name: syntax_validity
+  - _target_: src.metrics.PassAt1
+    name: pass_at_1
+    rtol: 1.0e-6
+    atol: 1.0e-6
+    timeout_seconds: 1.0
+    memory_mb: 128
+    workers: 2

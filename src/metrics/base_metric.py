@@ -13,6 +13,11 @@ class BaseMetric:
         """
         self.name = name if name is not None else type(self).__name__
 
+    @property
+    def names(self):
+        """Tracker keys emitted by this metric."""
+        return (self.name,)
+
     def weight(self, **batch):
         """Number of observations represented by a batch metric."""
         return 1

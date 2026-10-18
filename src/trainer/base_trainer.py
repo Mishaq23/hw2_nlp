@@ -306,22 +306,13 @@ class BaseTrainer:
         best = False
         stop_process = False
         if self.mnt_mode != "off":
-            try:
-                # check whether model performance improved or not,
-                # according to specified metric(mnt_metric)
-                if self.mnt_mode == "min":
-                    improved = logs[self.mnt_metric] <= self.mnt_best
-                elif self.mnt_mode == "max":
-                    improved = logs[self.mnt_metric] >= self.mnt_best
-                else:
-                    improved = False
-            except KeyError:
-                self.logger.warning(
-                    f"Warning: Metric '{self.mnt_metric}' is not found. "
-                    "Model performance monitoring is disabled."
-                )
-                self.mnt_mode = "off"
-                improved = False
+            if self.mnt_metric not in logs:
+                # Generation metrics can be measured less often than loss.
+                return False, False, not_improved_count
+            if self.mnt_mode == "min":
+                improved = logs[self.mnt_metric] < self.mnt_best
+            else:
+                improved = logs[self.mnt_metric] > self.mnt_best
 
             if improved:
                 self.mnt_best = logs[self.mnt_metric]
@@ -332,7 +323,7 @@ class BaseTrainer:
 
             if not_improved_count >= self.early_stop:
                 self.logger.info(
-                    "Validation performance didn't improve for {} epochs. "
+                    "Validation performance didn't improve for {} checks. "
                     "Training stops.".format(self.early_stop)
                 )
                 stop_process = True
@@ -456,6 +447,12 @@ class BaseTrainer:
         for metric_name in metric_tracker.keys():
             self.writer.add_scalar(f"{metric_name}", metric_tracker.avg(metric_name))
 
+    def _checkpoint_metadata(self):
+        return {}
+
+    def _restore_checkpoint_metadata(self, checkpoint):
+        pass
+
     def _save_checkpoint(self, epoch, save_best=False, only_best=False):
         """
         Save the checkpoints.
@@ -476,6 +473,7 @@ class BaseTrainer:
             "lr_scheduler": self.lr_scheduler.state_dict(),
             "monitor_best": self.mnt_best,
             "config": self.config,
+            **self._checkpoint_metadata(),
         }
         filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}.pth")
         if not (only_best and save_best):
@@ -506,7 +504,8 @@ class BaseTrainer:
         self.logger.info(f"Loading checkpoint: {resume_path} ...")
         checkpoint = torch.load(resume_path, self.device, weights_only=False)
         self.start_epoch = checkpoint["epoch"] + 1
-        self.mnt_best = checkpoint["monitor_best"]
+        if checkpoint["config"]["trainer"].get("monitor") == self.monitor:
+            self.mnt_best = checkpoint["monitor_best"]
 
         # load architecture params from checkpoint.
         if checkpoint["config"]["model"] != self.config["model"]:
@@ -530,6 +529,8 @@ class BaseTrainer:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
+        self._restore_checkpoint_metadata(checkpoint)
+
         self.logger.info(
             f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
         )
@@ -551,6 +552,11 @@ class BaseTrainer:
         else:
             print(f"Loading model weights from: {pretrained_path} ...")
         checkpoint = torch.load(pretrained_path, self.device, weights_only=False)
+        self.pretrained_metadata = {
+            key: checkpoint[key]
+            for key in ("decoding", "epoch", "validation_pass_at_1", "monitor_best")
+            if key in checkpoint
+        }
 
         if checkpoint.get("state_dict") is not None:
             self.model.load_state_dict(checkpoint["state_dict"])

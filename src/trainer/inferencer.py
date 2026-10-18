@@ -6,7 +6,7 @@ from tqdm.auto import tqdm
 
 from src.datasets.tokenizer import CodeTokenizer
 from src.metrics.tracker import MetricTracker
-from src.model.generation import greedy_generate
+from src.model.generation import generate
 from src.trainer.base_trainer import BaseTrainer
 
 
@@ -88,6 +88,17 @@ class Inferencer(BaseTrainer):
             # init model
             self._from_pretrained(config.inferencer.get("from_pretrained"))
 
+        saved_decoding = getattr(self, "pretrained_metadata", {}).get("decoding", {})
+        self.num_beams = self.generation.get("num_beams")
+        if self.num_beams is None:
+            self.num_beams = saved_decoding.get("num_beams", 1)
+        self.length_penalty = self.generation.get("length_penalty")
+        if self.length_penalty is None:
+            self.length_penalty = saved_decoding.get("length_penalty", 1.0)
+        print(
+            f"Generation: num_beams={self.num_beams}, length_penalty={self.length_penalty}"
+        )
+
     def run_inference(self):
         """
         Run inference on each partition.
@@ -127,11 +138,13 @@ class Inferencer(BaseTrainer):
         batch = self.move_batch_to_device(batch)
         batch = self.transform_batch(batch)  # transform batch on device -- faster
 
-        ids = greedy_generate(
+        ids = generate(
             self.model,
             batch["encoder_input_ids"],
             batch["encoder_attention_mask"],
             self.generation.max_new_tokens,
+            num_beams=self.num_beams,
+            length_penalty=self.length_penalty,
         )
         batch["generated_code"] = [
             self.tokenizer.decode(row) for row in ids.cpu().tolist()
@@ -202,5 +215,10 @@ class Inferencer(BaseTrainer):
         logs.update(
             generation_seconds=perf_counter() - start,
             generated_examples=len(self.predictions),
+            num_beams=self.num_beams,
         )
+        if self.save_path is not None:
+            (self.save_path / part / "metrics.json").write_text(
+                json.dumps(logs, indent=2) + "\n", encoding="utf-8"
+            )
         return logs

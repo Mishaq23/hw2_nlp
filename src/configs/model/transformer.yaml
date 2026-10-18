@@ -8,7 +8,7 @@ n_decoder_layers: 4
 d_ff: 1024
 dropout: 0.1 # embeddings, FFN hidden states, and residual branches
 attention_dropout: 0.1
-activation: gelu # gelu, relu, or silu
+activation: gelu # gelu, relu, silu, or swiglu (d_ff is the width after gating)
 rope_theta: 10000.0 # RoPE on encoder/decoder self-attention Q/K only
 layer_norm_eps: 1.0e-5 # Pre-LayerNorm plus a final norm in each stack
 bias: true # attention/FFN linear layers and LayerNorm

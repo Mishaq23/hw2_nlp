@@ -213,21 +213,60 @@ perplexity, and token accuracy ignore label padding and aggregate by the number
 of target tokens, including EOS. Perplexity is exp(mean NLL) over all evaluated
 tokens and uses unsmoothed cross-entropy even when training uses label smoothing.
 
-Every 5 epochs, validation also greedily generates code for the first 128 val
-examples, with a limit of 256 new tokens per example. It logs `syntax_validity`,
-`generation_seconds`, and `generated_examples`. Syntax checks compile the code
-without executing it and reject empty outputs; valid syntax does not imply a
-correct solution. The timing covers this validation subset, so the 180-second
-T4 test requirement still needs a separate full-test measurement. Change or
-disable this check through `generation_validation`:
+Every 5 epochs (and at the final epoch), validation generates one
+program per question on a **fixed random subset of up to 512 validation examples**.
+`generation_validation.seed` fixes this subset independently of model RNG;
+`max_new_tokens=256` matches inference. The default checkpoint monitor is
+**`max val_pass_at_1`**. Missing metrics between generation checks are skipped
+without disabling monitoring. Equal scores keep the earlier best checkpoint;
+early stopping counts measured checks rather than skipped epochs.
+
+The `exp07_swiglu` experiment uses SwiGLU (`d_model=512`, `d_ff=1792`, 6+6 layers,
+8 heads, 56,217,600 parameters with vocabulary 8192). Its packed input projection
+produces gate and value vectors; `SiLU(gate) * value` is projected back to
+`d_model`. Dropout is unchanged. Existing GELU checkpoints retain their original
+parameter names and shapes.
+
+This experiment compares `generation_validation.num_beams=[1,3]` with a shared
+length penalty of 1.0 and validation batch size 16. Both modes use the same fixed
+questions. `val_pass_at_1` is the larger score, and `model_best.pth` stores the
+winning checkpoint and decoding mode. `model_best_greedy.pth` and
+`model_best_beam3.pth` additionally keep each mode's best inference weights.
+The base `code_generation` config still evaluates only greedy by default.
+Start this experiment with `python train.py -cn exp07_swiglu` after configuring
+the prepared data path and Comet API key as described below.
+
+Local pass@1 compares `solve()` results against the provided validation code
+using `abs(prediction-reference) <= atol + rtol*abs(reference)` with both
+tolerances set to `1e-6`. Reference results are cached. Invalid/non-numeric or
+unsupported references are excluded from the denominator; generated failures
+on valid references score zero. This measures agreement with the provided
+programs, whose answers are not guaranteed correct, and is **not the official
+bot score**. It creates no additional training targets.
+
+Programs run in separate Python processes with wall-time/CPU limits and a
+Linux memory limit, restricted builtins, and public exports from `math`,
+`fractions`, `decimal`, and `statistics`. Other imports are unsupported.
+These are best-effort execution restrictions, not a hardened OS sandbox.
+Execution options are in `src/configs/metrics/code_generation.yaml`.
+
+Comet logs `pass_at_1_val`, `reference_validity_val`, `execution_validity_val`,
+and `pass_at_1_examples_val`, in addition to syntax validity and token metrics.
+When comparing modes, it also logs `pass_at_1_greedy_val`, `pass_at_1_beam3_val`,
+their separate generation/execution times, and `selected_num_beams_val`.
+`generation_seconds` excludes CPU code checking; `execution_seconds` reports
+that checking separately. The 180-second T4 limit still needs a separate
+full-test inference measurement. Configure or disable this check with:
 
 ```bash
 python train.py -cn code_generation generation_validation.every_n_epochs=10
-python train.py -cn code_generation generation_validation.enabled=false
+python train.py -cn code_generation generation_validation.enabled=false 'trainer.monitor=min val_loss'
 ```
 
-Pass@1 requires an answer checker and is currently obtained through the
-competition; it is not approximated by syntax validity or token accuracy.
+When reusing older launch commands, replace an explicit
+`generation_validation.max_examples=32` with `512`; CLI overrides take
+precedence over the new default. Syntax validity and token accuracy are
+diagnostics and do not replace execution-based correctness.
 
 To train a model, run the following command:
 
@@ -284,11 +323,15 @@ python inference.py inferencer.checkpoint_dir=saved/rope_preln
 
 Each training run saves `tokenizer.json` beside its `config.yaml` and checkpoints.
 Inference reads the trained architecture from that config and uses this
-tokenizer. It performs greedy generation with K/V caches and saves
+tokenizer. It uses the decoding mode stored in the checkpoint (greedy for old
+checkpoints), with K/V caches, and saves
 `data/saved/code_generation/test/predictions.jsonl`, with one `{sample_id, code}`
 record per test example, sorted by the original sample ID. The last partial
 batch is retained. Syntax validity and full-partition generation time are logged;
-the final competition submission format still depends on the checker instructions.
+`metrics.json` records generation time and the beam count. Set
+`inferencer.generation.num_beams=1` or `3` to override automatic selection;
+`inferencer.generation.length_penalty` can also be overridden. The bot submission
+uses only `{"code": "..."}` from each prediction, in the same order.
 
 ## Useful Links:
 

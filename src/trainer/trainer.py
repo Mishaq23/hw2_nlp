@@ -2,10 +2,11 @@ from time import perf_counter
 
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader, Subset
 
 from src.datasets.tokenizer import CodeTokenizer
 from src.metrics.tracker import MetricTracker
-from src.model.generation import greedy_generate
+from src.model.generation import generate
 from src.trainer.base_trainer import BaseTrainer
 
 
@@ -13,6 +14,17 @@ class Trainer(BaseTrainer):
     """
     Trainer class. Defines the logic of batch logging and processing.
     """
+
+    def __init__(self, *args, **kwargs):
+        self.generation_best_scores = {}
+        self.selected_decoding = {"num_beams": 1, "length_penalty": 1.0}
+        super().__init__(*args, **kwargs)
+        if self.monitor != "off" and self.mnt_metric == "val_pass_at_1":
+            if not self.config.generation_validation.enabled:
+                raise ValueError(
+                    "val_pass_at_1 requires generation_validation.enabled=true; "
+                    "use trainer.monitor='min val_loss' to disable generation."
+                )
 
     def process_batch(self, batch, metrics: MetricTracker):
         """
@@ -69,7 +81,11 @@ class Trainer(BaseTrainer):
     def _evaluation_epoch(self, epoch, part, dataloader):
         logs = super()._evaluation_epoch(epoch, part, dataloader)
         config = self.config.get("generation_validation")
-        if config is not None and config.enabled and epoch % config.every_n_epochs == 0:
+        if (
+            config is not None
+            and config.enabled
+            and (epoch % config.every_n_epochs == 0 or epoch == self.epochs)
+        ):
             generated_logs = self._evaluate_generation(dataloader, config)
             logs.update(generated_logs)
             for name, value in generated_logs.items():
@@ -78,10 +94,44 @@ class Trainer(BaseTrainer):
 
     @torch.no_grad()
     def _evaluate_generation(self, dataloader, config):
+        modes = {}
+        for num_beams in config.get("num_beams", [1]):
+            name = "greedy" if num_beams == 1 else f"beam{num_beams}"
+            modes[name] = self._evaluate_generation_mode(dataloader, config, num_beams)
+        # Prefer the first configured mode (greedy by default) on equal scores.
+        winner = max(modes, key=lambda name: modes[name].get("pass_at_1", 0.0))
+        num_beams = 1 if winner == "greedy" else int(winner.removeprefix("beam"))
+        self.selected_decoding = {
+            "num_beams": num_beams,
+            "length_penalty": config.get("length_penalty", 1.0),
+        }
+        return {
+            **modes[winner],
+            "selected_num_beams": num_beams,
+            **{
+                f"{metric}_{name}": value
+                for name, results in modes.items()
+                for metric, value in results.items()
+            },
+        }
+
+    @torch.no_grad()
+    def _evaluate_generation_mode(self, dataloader, config, num_beams):
         metric_funcs = self.metrics["generation"]
         tracker = MetricTracker(
-            *[m.name for m in metric_funcs],
+            *[name for metric in metric_funcs for name in metric.names],
             transforms={m.name: m.compute for m in metric_funcs},
+        )
+        generator = torch.Generator().manual_seed(config.get("seed", 42))
+        indices = torch.randperm(len(dataloader.dataset), generator=generator)[
+            : config.max_examples
+        ].tolist()
+        dataloader = DataLoader(
+            Subset(dataloader.dataset, indices),
+            batch_size=config.get("batch_size") or dataloader.batch_size,
+            collate_fn=dataloader.collate_fn,
+            num_workers=0,
+            generator=generator,
         )
         tokenizer = CodeTokenizer.from_file(self.config.model.tokenizer_path)
         device = torch.device(self.device)
@@ -89,22 +139,36 @@ class Trainer(BaseTrainer):
             torch.cuda.synchronize(device)
         start = perf_counter()
         count = 0
+        execution_seconds = 0.0
         examples = []
         for batch in dataloader:
             size = min(config.max_examples - count, batch["encoder_input_ids"].size(0))
             if size <= 0:
                 break
-            generated_ids = greedy_generate(
+            generated_ids = generate(
                 self.model,
                 batch["encoder_input_ids"][:size].to(device),
                 batch["encoder_attention_mask"][:size].to(device),
                 config.max_new_tokens,
+                num_beams=num_beams,
+                length_penalty=config.get("length_penalty", 1.0),
             )
             generated_code = [
                 tokenizer.decode(ids) for ids in generated_ids.cpu().tolist()
             ]
+            ignore_index = self.config.loss_function.get("ignore_index", -100)
+            reference_code = [
+                tokenizer.decode(labels[labels.ne(ignore_index)].tolist())
+                for labels in batch["labels"][:size]
+            ]
+            execution_start = perf_counter()
             for met in metric_funcs:
-                met.update(tracker, generated_code=generated_code)
+                met.update(
+                    tracker,
+                    generated_code=generated_code,
+                    reference_code=reference_code,
+                )
+            execution_seconds += perf_counter() - execution_start
             for index in range(min(size, 8 - len(examples))):
                 labels = batch["labels"][index]
                 ignore_index = self.config.loss_function.get("ignore_index", -100)
@@ -127,11 +191,59 @@ class Trainer(BaseTrainer):
             torch.cuda.synchronize(device)
         logs = {
             **tracker.result(),
-            "generation_seconds": perf_counter() - start,
+            "generation_seconds": perf_counter() - start - execution_seconds,
+            "execution_seconds": execution_seconds,
             "generated_examples": count,
         }
-        self.writer.add_table("generation_examples", pd.DataFrame(examples))
+        if "reference_validity" in logs:
+            logs["pass_at_1_examples"] = round(logs["reference_validity"] * count)
+            if logs["pass_at_1_examples"] == 0:
+                raise ValueError(
+                    "No executable numeric validation references; pass@1 cannot be measured."
+                )
+        mode = "greedy" if num_beams == 1 else f"beam{num_beams}"
+        self.writer.add_table(f"generation_examples_{mode}", pd.DataFrame(examples))
         return logs
+
+    def _monitor_performance(self, logs, not_improved_count):
+        config = self.config.get("generation_validation")
+        if config is not None:
+            for num_beams in config.get("num_beams", [1]):
+                name = "greedy" if num_beams == 1 else f"beam{num_beams}"
+                score = logs.get(f"val_pass_at_1_{name}")
+                if score is None or score <= self.generation_best_scores.get(
+                    name, -float("inf")
+                ):
+                    continue
+                self.generation_best_scores[name] = score
+                path = self.checkpoint_dir / f"model_best_{name}.pth"
+                # These files are for inference; optimizer state stays in the
+                # regular model_best/periodic training checkpoints.
+                torch.save(
+                    {
+                        "state_dict": self.model.state_dict(),
+                        "epoch": logs["epoch"],
+                        "config": self.config,
+                        "validation_pass_at_1": score,
+                        "decoding": {
+                            "num_beams": num_beams,
+                            "length_penalty": config.get("length_penalty", 1.0),
+                        },
+                    },
+                    path,
+                )
+                self.logger.info("Saving %s: pass@1=%.4f", path.name, score)
+        return super()._monitor_performance(logs, not_improved_count)
+
+    def _checkpoint_metadata(self):
+        return {
+            "decoding": self.selected_decoding,
+            "generation_best_scores": self.generation_best_scores,
+        }
+
+    def _restore_checkpoint_metadata(self, checkpoint):
+        self.selected_decoding = checkpoint.get("decoding", self.selected_decoding)
+        self.generation_best_scores = checkpoint.get("generation_best_scores", {})
 
     def _log_batch(self, batch_idx, batch, mode="train"):
         """

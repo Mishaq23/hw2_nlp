@@ -68,11 +68,24 @@ class MultiHeadAttention(nn.Module):
         return self.out_proj(attended), (k, v)
 
 
+class SwiGLU(nn.Module):
+    """Gate and value projections are packed into the preceding linear layer."""
+
+    def forward(self, x):
+        gate, value = x.chunk(2, dim=-1)
+        return F.silu(gate) * value
+
+
 class FeedForward(nn.Sequential):
     def __init__(self, d_model, d_ff, dropout, activation, bias):
-        activation_fn = {"gelu": nn.GELU, "relu": nn.ReLU, "silu": nn.SiLU}[activation]
+        activation_fn = {
+            "gelu": nn.GELU,
+            "relu": nn.ReLU,
+            "silu": nn.SiLU,
+            "swiglu": SwiGLU,
+        }[activation]
         super().__init__(
-            nn.Linear(d_model, d_ff, bias=bias),
+            nn.Linear(d_model, 2 * d_ff if activation == "swiglu" else d_ff, bias=bias),
             activation_fn(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=bias),
