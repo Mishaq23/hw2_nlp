@@ -19,6 +19,9 @@ class Trainer(BaseTrainer):
         self.generation_best_scores = {}
         self.selected_decoding = {"num_beams": 1, "length_penalty": 1.0}
         super().__init__(*args, **kwargs)
+        self.selected_decoding.setdefault(
+            "max_new_tokens", self.config.generation_validation.max_new_tokens
+        )
         if self.monitor != "off" and self.mnt_metric == "val_pass_at_1":
             if not self.config.generation_validation.enabled:
                 raise ValueError(
@@ -104,6 +107,7 @@ class Trainer(BaseTrainer):
         self.selected_decoding = {
             "num_beams": num_beams,
             "length_penalty": config.get("length_penalty", 1.0),
+            "max_new_tokens": config.max_new_tokens,
         }
         return {
             **modes[winner],
@@ -228,6 +232,7 @@ class Trainer(BaseTrainer):
                         "decoding": {
                             "num_beams": num_beams,
                             "length_penalty": config.get("length_penalty", 1.0),
+                            "max_new_tokens": config.max_new_tokens,
                         },
                     },
                     path,

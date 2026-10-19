@@ -236,6 +236,22 @@ The base `code_generation` config still evaluates only greedy by default.
 Start this experiment with `python train.py -cn exp07_swiglu` after configuring
 the prepared data path and Comet API key as described below.
 
+The next configuration, `exp08_swiglu`, uses `d_model=512`, `d_ff=2048` and 5+5
+layers (51,484,672 parameters with vocabulary 8192), batch size 32 and 170 windows
+of 500 steps (85,000 updates). It samples 2.4 million raw rows across all source
+shards and evaluates only greedy generation, with `max_new_tokens=1024`.
+The best checkpoint maximizes pass@1 on the fixed 512-question validation subset.
+Other model and optimizer settings are inherited from exp07; cosine `T_max` is
+computed from the new step budget.
+
+Set `data_preparation.reuse_from=/path/to/previous/prepared` to reuse a previous
+tokenizer and the exact encoded validation split when increasing the train
+sample. The split seed and validation fraction must match the previous run,
+so old validation questions remain excluded from train. The previous prepared
+directory is read only; newly sampled train and official test are encoded into
+the new output directory. Without this option, preparation trains a new tokenizer
+and creates a new validation split.
+
 Local pass@1 compares `solve()` results against the provided validation code
 using `abs(prediction-reference) <= atol + rtol*abs(reference)` with both
 tolerances set to `1e-6`. Reference results are cached. Invalid/non-numeric or
@@ -332,6 +348,10 @@ batch is retained. Syntax validity and full-partition generation time are logged
 `inferencer.generation.num_beams=1` or `3` to override automatic selection;
 `inferencer.generation.length_penalty` can also be overridden. The bot submission
 uses only `{"code": "..."}` from each prediction, in the same order.
+The generation token limit defaults to the checkpoint's selected settings,
+then its saved training configuration, with 256 as a legacy fallback. An explicit
+`inferencer.generation.max_new_tokens` overrides this. The resolved limit is
+printed at startup and included in `metrics.json`.
 
 ## Useful Links:
 

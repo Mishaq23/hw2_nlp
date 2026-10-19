@@ -95,8 +95,17 @@ class Inferencer(BaseTrainer):
         self.length_penalty = self.generation.get("length_penalty")
         if self.length_penalty is None:
             self.length_penalty = saved_decoding.get("length_penalty", 1.0)
+        self.max_new_tokens = self.generation.get("max_new_tokens")
+        if self.max_new_tokens is None:
+            training_generation = getattr(self, "pretrained_metadata", {}).get(
+                "generation_validation", {}
+            )
+            self.max_new_tokens = saved_decoding.get(
+                "max_new_tokens", training_generation.get("max_new_tokens", 256)
+            )
         print(
-            f"Generation: num_beams={self.num_beams}, length_penalty={self.length_penalty}"
+            f"Generation: num_beams={self.num_beams}, "
+            f"length_penalty={self.length_penalty}, max_new_tokens={self.max_new_tokens}"
         )
 
     def run_inference(self):
@@ -142,7 +151,7 @@ class Inferencer(BaseTrainer):
             self.model,
             batch["encoder_input_ids"],
             batch["encoder_attention_mask"],
-            self.generation.max_new_tokens,
+            self.max_new_tokens,
             num_beams=self.num_beams,
             length_penalty=self.length_penalty,
         )
@@ -216,6 +225,7 @@ class Inferencer(BaseTrainer):
             generation_seconds=perf_counter() - start,
             generated_examples=len(self.predictions),
             num_beams=self.num_beams,
+            max_new_tokens=self.max_new_tokens,
         )
         if self.save_path is not None:
             (self.save_path / part / "metrics.json").write_text(

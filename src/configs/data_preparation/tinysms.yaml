@@ -1,4 +1,5 @@
 enabled: true
+reuse_from: null # prepared directory: reuse its tokenizer and exact validation split
 dataset:
   path: SlavaYus/tinysms_qa_12m
   revision: b2724689ff079e9c22efd548fe134bfb29036dbb

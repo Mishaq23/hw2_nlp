@@ -1,0 +1,26 @@
+defaults:
+  - exp07_swiglu
+  - _self_
+
+writer:
+  run_name: exp08_swiglu51m_b32_85k_2400k
+
+model:
+  d_ff: 2048
+  n_encoder_layers: 5
+  n_decoder_layers: 5
+
+trainer:
+  n_epochs: 170 # 170 windows * 500 batches = 85,000 optimizer steps
+  save_period: 170
+
+dataloader:
+  batch_size: 32
+
+data_preparation:
+  sampling:
+    max_rows: 2400000
+
+generation_validation:
+  num_beams: [1]
+  max_new_tokens: 1024

@@ -20,6 +20,6 @@ inferencer:
   train_config: ${inferencer.checkpoint_dir}/config.yaml
   save_path: code_generation
   generation:
-    max_new_tokens: 256
+    max_new_tokens: null # checkpoint/training setting; legacy checkpoints: 256
     num_beams: null # null: use checkpoint's selected decoding; old checkpoints: greedy
     length_penalty: null # null: use checkpoint's value; old checkpoints: 1.0

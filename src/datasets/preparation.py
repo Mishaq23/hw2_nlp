@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 from omegaconf import OmegaConf
 
-from datasets import DatasetDict, load_dataset
+from datasets import DatasetDict, load_dataset, load_from_disk
 from src.datasets.code_generation import tokenize_dataset
 from src.datasets.sampling import sample_parquet_files
 from src.datasets.tinysms import prepare_raw_splits
@@ -46,20 +46,42 @@ def prepare_data(config):
 
 def _prepare_and_save(raw, settings, output, sampling_metadata=None):
     """Use the existing split/tokenizer pipeline, then persist only final data."""
+    reused_validation = None
+    reference = settings.get("reuse_from")
+    if reference is not None:
+        reference = Path(reference)
+        previous = json.loads((reference / "metadata.json").read_text(encoding="utf-8"))
+        # The same hash partition keeps every old validation question out of train,
+        # including variants that were sampled from a different source shard.
+        for key in ("seed", "validation_fraction"):
+            if previous["config"]["split"][key] != settings["split"][key]:
+                raise ValueError(f"reuse_from requires the same split.{key}.")
+        tokenizer = CodeTokenizer.from_file(reference / "tokenizer.json")
+        reused_validation = load_from_disk(str(reference / "encoded" / "val"))
+        tokenizer_training_rows = 0
+        print(f"Reusing tokenizer and validation: {reference.resolve()}")
+
     splits = prepare_raw_splits(raw, **settings["split"])
-    tokenizer_train = splits["train"]
-    limit = settings["tokenizer_train_rows"]
-    if limit is not None:
-        if limit < 1:
-            raise ValueError("tokenizer_train_rows must be positive or null.")
-        tokenizer_train = tokenizer_train.shuffle(
-            seed=settings["split"]["seed"]
-        ).select(range(min(limit, len(tokenizer_train))))
-    tokenizer = CodeTokenizer.train(tokenizer_train, **settings["tokenizer"])
+    if reference is None:
+        tokenizer_train = splits["train"]
+        limit = settings["tokenizer_train_rows"]
+        if limit is not None:
+            if limit < 1:
+                raise ValueError("tokenizer_train_rows must be positive or null.")
+            tokenizer_train = tokenizer_train.shuffle(
+                seed=settings["split"]["seed"]
+            ).select(range(min(limit, len(tokenizer_train))))
+        tokenizer = CodeTokenizer.train(tokenizer_train, **settings["tokenizer"])
+        tokenizer_training_rows = len(tokenizer_train)
+
     encoded = DatasetDict(
         {
-            name: tokenize_dataset(
-                data, tokenizer, has_targets=name != "test", **settings["tokenize"]
+            name: (
+                reused_validation
+                if name == "val" and reused_validation is not None
+                else tokenize_dataset(
+                    data, tokenizer, has_targets=name != "test", **settings["tokenize"]
+                )
             )
             for name, data in splits.items()
         }
@@ -69,8 +91,8 @@ def _prepare_and_save(raw, settings, output, sampling_metadata=None):
     metadata = {
         "config": settings,
         "raw_rows": {name: len(data) for name, data in raw.items()},
-        "split_rows": {name: len(data) for name, data in splits.items()},
-        "tokenizer_training_rows": len(tokenizer_train),
+        "split_rows": {name: len(data) for name, data in encoded.items()},
+        "tokenizer_training_rows": tokenizer_training_rows,
         "actual_vocab_size": tokenizer.vocab_size,
     }
     if sampling_metadata is not None:

@@ -557,6 +557,9 @@ class BaseTrainer:
             for key in ("decoding", "epoch", "validation_pass_at_1", "monitor_best")
             if key in checkpoint
         }
+        self.pretrained_metadata["generation_validation"] = checkpoint.get(
+            "config", {}
+        ).get("generation_validation", {})
 
         if checkpoint.get("state_dict") is not None:
             self.model.load_state_dict(checkpoint["state_dict"])
