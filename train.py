@@ -1,4 +1,6 @@
+import json
 import warnings
+from pathlib import Path
 from shutil import copy2
 
 import hydra
@@ -28,6 +30,22 @@ def main(config):
     set_random_seed(config.trainer.seed)
     if config.get("data_preparation") is not None:
         prepare_data(config.data_preparation)
+
+    finetune_checkpoint = None
+    if config.trainer.get("finetune_from") is not None:
+        checkpoint_path = Path(config.trainer.finetune_from)
+        finetune_checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        tokenizer_path = config.model.tokenizer_path
+        previous_tokenizer = checkpoint_path.parent / "tokenizer.json"
+        if json.loads(previous_tokenizer.read_text()) != json.loads(
+            Path(tokenizer_path).read_text()
+        ):
+            raise ValueError("Finetuning requires the checkpoint's original tokenizer.")
+        # Architecture comes from the source checkpoint, independently of experiment size.
+        config.model = OmegaConf.create(finetune_checkpoint["config"]["model"])
+        config.model.tokenizer_path = tokenizer_path
 
     if config.trainer.device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -79,7 +97,9 @@ def main(config):
         writer=writer,
         batch_transforms=batch_transforms,
         skip_oom=config.trainer.get("skip_oom", True),
+        finetune_checkpoint=finetune_checkpoint,
     )
+    del finetune_checkpoint
 
     try:
         trainer.train()

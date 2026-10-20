@@ -1,0 +1,46 @@
+defaults:
+  - exp08_swiglu
+  - _self_
+
+writer:
+  run_name: exp09_finetune_fp32_b32_30k
+
+data_preparation:
+  enabled: false # read yesterday's prepared data directly from Kaggle Input
+
+trainer:
+  finetune_from: ??? # supply model_best.pth from the previous Output
+  restore_optimizer: true
+  n_epochs: 60
+  epoch_len: 500
+  save_period: 0 # best + checkpoint-last are still saved
+  validate_before_training: true
+  validation_every_n_epochs: 5
+  max_train_seconds: 32400 # 9 hours; leave time for final validation, inference and ZIP
+  seed: 2 # new shuffle; validation subset remains fixed by generation seed=42
+
+optimizer:
+  lr: 5.0e-5
+
+lr_scheduler:
+  T_max: null # 30,000 additional optimizer steps
+  eta_min: 3.0e-6
+
+dataloader:
+  persistent_workers: true
+  collate_fn:
+    pad_to_multiple_of: 8
+
+batching:
+  enabled: true
+  pool_batches: 64
+
+compile:
+  enabled: true
+
+generation_validation:
+  num_beams: [1]
+  every_n_epochs: 5
+  max_examples: 512
+  batch_size: 16
+  max_new_tokens: 1024

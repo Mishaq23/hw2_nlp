@@ -28,6 +28,33 @@ class Trainer(BaseTrainer):
                     "val_pass_at_1 requires generation_validation.enabled=true; "
                     "use trainer.monitor='min val_loss' to disable generation."
                 )
+        self._compiled_forward = None
+        self.compile_config = self.config.get("compile", {})
+        if self.compile_config.get("enabled", False):
+            try:
+                # Keep the original module for state_dict and autoregressive generation.
+                self._compiled_forward = torch.compile(
+                    self.model.forward,
+                    backend=self.compile_config.get("backend", "inductor"),
+                    mode=self.compile_config.get("mode", "default"),
+                    dynamic=self.compile_config.get("dynamic"),
+                )
+                self.logger.info(
+                    "torch.compile enabled for training; first batches include compilation."
+                )
+            except Exception as error:
+                if not self.compile_config.get("fallback_to_eager", True):
+                    raise
+                self.logger.warning("torch.compile unavailable; using eager: %s", error)
+
+    def _forward_backward(self, batch):
+        forward = self._compiled_forward if self.is_train else None
+        inputs = {key: value for key, value in batch.items() if torch.is_tensor(value)}
+        outputs = forward(**inputs) if forward is not None else self.model(**inputs)
+        losses = self.criterion(**batch, **outputs)
+        if self.is_train:
+            losses["loss"].backward()
+        return {**outputs, **losses}
 
     def process_batch(self, batch, metrics: MetricTracker):
         """
@@ -48,47 +75,74 @@ class Trainer(BaseTrainer):
                 the dataloader (possibly transformed via batch transform),
                 model outputs, and losses.
         """
+        ignore_index = self.config.loss_function.get("ignore_index", -100)
+        batch["token_count"] = batch["labels"].ne(ignore_index).sum().item()
         batch = self.move_batch_to_device(batch)
         batch = self.transform_batch(batch)  # transform batch on device -- faster
 
         metric_funcs = self.metrics["inference"]
         if self.is_train:
             metric_funcs = self.metrics["train"]
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
-        outputs = self.model(**batch)
+        try:
+            outputs = self._forward_backward(batch)
+        except Exception as error:
+            compiler_error = type(error).__module__.startswith(
+                ("torch._dynamo", "torch._inductor", "triton")
+            )
+            if not (
+                self.is_train
+                and self._compiled_forward is not None
+                and compiler_error
+                and self.compile_config.get("fallback_to_eager", True)
+            ):
+                raise
+            self.logger.warning(
+                "torch.compile failed; retrying this batch in eager: %s", error
+            )
+            self._compiled_forward = None
+            self.optimizer.zero_grad(set_to_none=True)
+            outputs = self._forward_backward(batch)
         batch.update(outputs)
 
-        all_losses = self.criterion(**batch)
-        batch.update(all_losses)
-
         if self.is_train:
-            batch["loss"].backward()  # sum of all losses is always called loss
             self._clip_grad_norm()
             self.optimizer.step()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
 
         # update metrics for each loss (in case of multiple losses)
-        loss_weight = 1
-        if batch["labels"].ndim == 2:
-            ignore_index = self.config.loss_function.get("ignore_index", -100)
-            loss_weight = batch["labels"].ne(ignore_index).sum().item()
+        loss_weight = batch["token_count"]
         for loss_name in self.config.writer.loss_names:
             metrics.update(loss_name, batch[loss_name].item(), n=loss_weight)
+        if batch.get("mean_nll") is not None:
+            batch["mean_nll"] = batch["loss"].detach().item()
 
         for met in metric_funcs:
             met.update(metrics, **batch)
         return batch
 
     def _evaluation_epoch(self, epoch, part, dataloader):
-        logs = super()._evaluation_epoch(epoch, part, dataloader)
+        final = epoch == self.epochs or self._time_limit_reached
+        every = self.cfg_trainer.get("validation_every_n_epochs", 1)
+        logs = {}
+        if epoch == 0 or final or epoch % every == 0:
+            start = perf_counter()
+            logs = super()._evaluation_epoch(epoch, part, dataloader)
+            logs["teacher_forcing_seconds"] = perf_counter() - start
+            self.writer.add_scalar(
+                "teacher_forcing_seconds", logs["teacher_forcing_seconds"]
+            )
         config = self.config.get("generation_validation")
         if (
             config is not None
             and config.enabled
-            and (epoch % config.every_n_epochs == 0 or epoch == self.epochs)
+            and (epoch % config.every_n_epochs == 0 or final)
         ):
+            self.is_train = False
+            self.model.eval()
+            self.writer.set_step(self.completed_steps, part)
             generated_logs = self._evaluate_generation(dataloader, config)
             logs.update(generated_logs)
             for name, value in generated_logs.items():

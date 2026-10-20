@@ -12,4 +12,8 @@ class CodeGenerationLoss(nn.Module):
 
     def forward(self, logits, labels, **batch):
         # Dataset already aligns decoder inputs and labels; no extra shift.
-        return {"loss": self.loss(logits.flatten(0, 1), labels.flatten())}
+        loss = self.loss(logits.flatten(0, 1), labels.flatten())
+        return {
+            "loss": loss,
+            "mean_nll": loss.detach() if self.loss.label_smoothing == 0 else None,
+        }

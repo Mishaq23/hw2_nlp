@@ -7,7 +7,9 @@ from torch.nn.utils.rnn import pad_sequence
 from src.datasets.tokenizer import CodeTokenizer
 
 
-def code_generation_collate_fn(dataset_items: list[dict], pad_id: int) -> dict:
+def code_generation_collate_fn(
+    dataset_items: list[dict], pad_id: int, pad_to_multiple_of: int = 1
+) -> dict:
     """Right-pad seq2seq inputs on CPU; True in a mask means a real token.
 
     Dataset already shifts decoder inputs and labels. Label padding is -100
@@ -27,7 +29,9 @@ def code_generation_collate_fn(dataset_items: list[dict], pad_id: int) -> dict:
             raise ValueError("Decoder inputs and labels must have the same length.")
 
     encoder_ids, encoder_mask = _pad_inputs(
-        [item["encoder_input_ids"] for item in dataset_items], pad_id
+        [item["encoder_input_ids"] for item in dataset_items],
+        pad_id,
+        pad_to_multiple_of,
     )
     batch = {
         "encoder_input_ids": encoder_ids,
@@ -36,7 +40,9 @@ def code_generation_collate_fn(dataset_items: list[dict], pad_id: int) -> dict:
     }
     if has_targets:
         decoder_ids, decoder_mask = _pad_inputs(
-            [item["decoder_input_ids"] for item in dataset_items], pad_id
+            [item["decoder_input_ids"] for item in dataset_items],
+            pad_id,
+            pad_to_multiple_of,
         )
         batch.update(
             decoder_input_ids=decoder_ids,
@@ -50,21 +56,37 @@ def code_generation_collate_fn(dataset_items: list[dict], pad_id: int) -> dict:
                 padding_value=-100,
             ),
         )
+        extra = decoder_ids.size(1) - batch["labels"].size(1)
+        if extra:
+            batch["labels"] = torch.nn.functional.pad(
+                batch["labels"], (0, extra), value=-100
+            )
     return batch
 
 
-def _pad_inputs(sequences, pad_id):
+def _pad_inputs(sequences, pad_id, pad_to_multiple_of):
     tensors = [
         torch.as_tensor(sequence, dtype=torch.long, device="cpu")
         for sequence in sequences
     ]
     padded = pad_sequence(tensors, batch_first=True, padding_value=pad_id)
+    extra = -padded.size(1) % pad_to_multiple_of
+    if extra:
+        padded = torch.nn.functional.pad(padded, (0, extra), value=pad_id)
     lengths = torch.tensor([len(sequence) for sequence in tensors])
     mask = torch.arange(padded.shape[1]).unsqueeze(0) < lengths.unsqueeze(1)
     return padded, mask
 
 
-def make_code_generation_collate(tokenizer_path: str | Path):
+def make_code_generation_collate(
+    tokenizer_path: str | Path, pad_to_multiple_of: int = 1
+):
     """Bind the saved tokenizer's PAD ID; the resulting partial is picklable."""
     pad_id = CodeTokenizer.from_file(tokenizer_path).pad_id
-    return partial(code_generation_collate_fn, pad_id=pad_id)
+    if pad_to_multiple_of < 1:
+        raise ValueError("pad_to_multiple_of must be positive.")
+    return partial(
+        code_generation_collate_fn,
+        pad_id=pad_id,
+        pad_to_multiple_of=pad_to_multiple_of,
+    )

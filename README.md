@@ -252,6 +252,40 @@ directory is read only; newly sampled train and official test are encoded into
 the new output directory. Without this option, preparation trains a new tokenizer
 and creates a new validation split.
 
+For a new finetuning stage, use `exp09_finetune` and set
+`trainer.finetune_from=/path/to/model_best.pth`. Architecture comes from the
+source checkpoint; the prepared tokenizer must match the tokenizer saved next to
+it. This stage keeps optimizer moments while applying the new optimizer settings,
+starts the cosine scheduler and stage step counter from zero, and uses the
+existing prepared data (`data_preparation.enabled=false`). With
+`trainer.restore_optimizer=false`, a weights-only checkpoint is also supported.
+This differs from `trainer.resume_from`, which continues the old epoch/scheduler.
+
+The default finetuning budget is 30,000 additional updates, batch 32, FP32,
+LR 5e-5, cosine to 3e-6. No AMP is enabled. Training batches group similar lengths
+within shuffled pools of 64 batches; sequences are padded to multiples of 8
+without truncation. `compile.enabled=true` compiles only the training forward
+and autograd graph, leaving generation and checkpoint keys unchanged. Compiler
+failures are logged and fall back to eager when `compile.fallback_to_eager=true`;
+ordinary model and CUDA OOM errors are not suppressed. Disable compilation with
+`compile.enabled=false` if it does not improve measured throughput.
+
+Initial validation saves the source model as the first best in the new run.
+Full validation and greedy pass@1 then run every 2,500 updates on the same fixed
+512 generation questions. `trainer.max_train_seconds=32400` limits training,
+validation and compilation to roughly nine hours, checked between batches.
+After the limit, final validation and saving still run; leave additional time
+for those steps, inference and the archive. `checkpoint-last.pth` stores the last
+state and `completed_steps` records actual stage updates. `trainer.save_period=0`
+disables numbered periodic files while retaining last and best checkpoints.
+The exact old dataloader position is not restored; the new shuffle/grouping
+changes which examples are presented first.
+
+With zero label smoothing, perplexity reuses the already computed cross-entropy;
+with smoothing it still computes plain NLL separately. Comet additionally logs
+`train_steps_per_sec_train`, `target_tokens_per_sec_train`,
+`train_seconds_train` and `teacher_forcing_seconds_val` for timing comparisons.
+
 Local pass@1 compares `solve()` results against the provided validation code
 using `abs(prediction-reference) <= atol + rtol*abs(reference)` with both
 tolerances set to `1e-6`. Reference results are cached. Invalid/non-numeric or

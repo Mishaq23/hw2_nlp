@@ -28,12 +28,28 @@ trainer:
   monitor: max val_pass_at_1
   max_grad_norm: 1.0
   resume_from: null
+  finetune_from: null # full checkpoint; starts a new stage with a fresh scheduler
+  restore_optimizer: true # preserve optimizer moments, apply the new configured LR
+  validate_before_training: false
+  validation_every_n_epochs: 1
+  max_train_seconds: null # includes validation and compilation; final evaluation follows
   device: auto
   override: false
   save_period: 5
   early_stop: ${trainer.n_epochs}
   save_dir: saved
   seed: 1
+
+batching:
+  enabled: false
+  pool_batches: 64
+
+compile:
+  enabled: false
+  backend: inductor
+  mode: default
+  dynamic: null # automatic dynamic shapes
+  fallback_to_eager: true # log compiler failures; ordinary model/OOM errors still raise
 
 generation_validation:
   enabled: true

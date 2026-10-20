@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from time import perf_counter
 
 import torch
 from numpy import inf
@@ -30,6 +31,7 @@ class BaseTrainer:
         epoch_len=None,
         skip_oom=True,
         batch_transforms=None,
+        finetune_checkpoint=None,
     ):
         """
         Args:
@@ -90,6 +92,9 @@ class BaseTrainer:
         self._last_epoch = 0  # required for saving on interruption
         self.start_epoch = 1
         self.epochs = self.cfg_trainer.n_epochs
+        self.completed_steps = 0
+        self._time_limit_reached = False
+        self._training_deadline = None
 
         # configuration to monitor model performance and save best
 
@@ -144,10 +149,41 @@ class BaseTrainer:
         if config.trainer.get("from_pretrained") is not None:
             self._from_pretrained(config.trainer.get("from_pretrained"))
 
+        if finetune_checkpoint is not None:
+            if config.trainer.get("resume_from") is not None:
+                raise ValueError("Use either finetune_from or resume_from.")
+            self.model.load_state_dict(finetune_checkpoint["state_dict"])
+            if self.cfg_trainer.get("restore_optimizer", True):
+                if "optimizer" not in finetune_checkpoint:
+                    raise ValueError(
+                        "Restoring optimizer requires a full checkpoint, such as "
+                        "model_best.pth; greedy checkpoints contain only weights."
+                    )
+                old_type = finetune_checkpoint["config"]["optimizer"]["_target_"]
+                if old_type != config.optimizer["_target_"]:
+                    raise ValueError(
+                        "Restoring optimizer requires the same optimizer type."
+                    )
+                settings = [
+                    {key: value for key, value in group.items() if key != "params"}
+                    for group in self.optimizer.param_groups
+                ]
+                self.optimizer.load_state_dict(finetune_checkpoint["optimizer"])
+                for group, configured in zip(self.optimizer.param_groups, settings):
+                    group.update(configured)
+            self.logger.info(
+                "Finetuning source epoch %s; new optimizer LR=%s, fresh scheduler.",
+                finetune_checkpoint.get("epoch"),
+                [group["lr"] for group in self.optimizer.param_groups],
+            )
+
     def train(self):
         """
         Wrapper around training process to save model on keyboard interrupt.
         """
+        seconds = self.cfg_trainer.get("max_train_seconds")
+        if seconds is not None:
+            self._training_deadline = perf_counter() + max(0, float(seconds))
         try:
             self._train_process()
         except KeyboardInterrupt as e:
@@ -164,6 +200,14 @@ class BaseTrainer:
         and saving the best checkpoint).
         """
         not_improved_count = 0
+        if self.cfg_trainer.get("validate_before_training", False):
+            logs = {"epoch": 0}
+            for part, dataloader in self.evaluation_dataloaders.items():
+                result = self._evaluation_epoch(0, part, dataloader)
+                logs.update({f"{part}_{key}": value for key, value in result.items()})
+            best, _, not_improved_count = self._monitor_performance(logs, 0)
+            self._save_checkpoint(0, save_best=best, only_best=True)
+            self.logger.info("Initial validation: %s", logs)
         for epoch in range(self.start_epoch, self.epochs + 1):
             self._last_epoch = epoch
             result = self._train_epoch(epoch)
@@ -182,11 +226,12 @@ class BaseTrainer:
                 logs, not_improved_count
             )
 
-            if epoch % self.save_period == 0 or best:
+            if (self.save_period and epoch % self.save_period == 0) or best:
                 self._save_checkpoint(epoch, save_best=best, only_best=True)
 
-            if stop_process:  # early_stop
+            if stop_process or self._time_limit_reached:
                 break
+        self._save_checkpoint(self._last_epoch, save_last=True)
 
     def _train_epoch(self, epoch):
         """
@@ -205,11 +250,20 @@ class BaseTrainer:
         epoch_metrics = MetricTracker(
             *self.train_metrics.keys(), transforms=self.train_metrics.transforms
         )
-        self.writer.set_step((epoch - 1) * self.epoch_len)
+        self.writer.set_step(self.completed_steps)
         self.writer.add_scalar("epoch", epoch)
+        started = perf_counter()
+        steps_before = self.completed_steps
+        target_tokens = 0
         for batch_idx, batch in enumerate(
             tqdm(self.train_dataloader, desc="train", total=self.epoch_len)
         ):
+            if (
+                self._training_deadline is not None
+                and perf_counter() >= self._training_deadline
+            ):
+                self._time_limit_reached = True
+                break
             try:
                 batch = self.process_batch(
                     batch,
@@ -223,11 +277,19 @@ class BaseTrainer:
                 else:
                     raise e
 
+            self.completed_steps += 1
+            target_tokens += batch.get("token_count", 0)
+            if (
+                self._training_deadline is not None
+                and perf_counter() >= self._training_deadline
+            ):
+                self._time_limit_reached = True
+
             self.train_metrics.update("grad_norm", self._get_grad_norm())
 
             # log current results
             if (batch_idx + 1) % self.log_step == 0 or batch_idx + 1 >= self.epoch_len:
-                self.writer.set_step((epoch - 1) * self.epoch_len + batch_idx + 1)
+                self.writer.set_step(self.completed_steps)
                 self.logger.debug(
                     "Train Epoch: {} {} Loss: {:.6f}".format(
                         epoch, self._progress(batch_idx), batch["loss"].item()
@@ -240,12 +302,26 @@ class BaseTrainer:
                 self._log_batch(batch_idx, batch)
                 epoch_metrics.merge(self.train_metrics)
                 self.train_metrics.reset()
-            if batch_idx + 1 >= self.epoch_len:
+            if batch_idx + 1 >= self.epoch_len or self._time_limit_reached:
                 break
 
         # Include a remaining window if the final batch was skipped after OOM.
         epoch_metrics.merge(self.train_metrics)
         logs = epoch_metrics.result()
+        elapsed = perf_counter() - started
+        logs.update(
+            train_seconds=elapsed,
+            train_steps_per_sec=(self.completed_steps - steps_before) / elapsed,
+            target_tokens_per_sec=target_tokens / elapsed,
+            completed_steps=self.completed_steps,
+        )
+        self.writer.set_step(self.completed_steps)
+        for name in ("train_seconds", "train_steps_per_sec", "target_tokens_per_sec"):
+            self.writer.add_scalar(name, logs[name])
+        if self._time_limit_reached:
+            self.logger.info(
+                "Training time budget reached; final validation and saving."
+            )
 
         # Run val/test
         for part, dataloader in self.evaluation_dataloaders.items():
@@ -278,7 +354,7 @@ class BaseTrainer:
                     batch,
                     metrics=self.evaluation_metrics,
                 )
-            self.writer.set_step(epoch * self.epoch_len, part)
+            self.writer.set_step(self.completed_steps, part)
             self._log_scalars(self.evaluation_metrics)
             self._log_batch(
                 batch_idx, batch, part
@@ -341,7 +417,9 @@ class BaseTrainer:
                 the dataloader with some of the tensors on the device.
         """
         for tensor_for_device in self.cfg_trainer.device_tensors:
-            batch[tensor_for_device] = batch[tensor_for_device].to(self.device)
+            batch[tensor_for_device] = batch[tensor_for_device].to(
+                self.device, non_blocking=True
+            )
         return batch
 
     def transform_batch(self, batch):
@@ -453,7 +531,9 @@ class BaseTrainer:
     def _restore_checkpoint_metadata(self, checkpoint):
         pass
 
-    def _save_checkpoint(self, epoch, save_best=False, only_best=False):
+    def _save_checkpoint(
+        self, epoch, save_best=False, only_best=False, save_last=False
+    ):
         """
         Save the checkpoints.
 
@@ -473,9 +553,11 @@ class BaseTrainer:
             "lr_scheduler": self.lr_scheduler.state_dict(),
             "monitor_best": self.mnt_best,
             "config": self.config,
+            "completed_steps": self.completed_steps,
             **self._checkpoint_metadata(),
         }
-        filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}.pth")
+        name = "checkpoint-last.pth" if save_last else f"checkpoint-epoch{epoch}.pth"
+        filename = str(self.checkpoint_dir / name)
         if not (only_best and save_best):
             torch.save(state, filename)
             if self.config.writer.log_checkpoints:
@@ -504,6 +586,9 @@ class BaseTrainer:
         self.logger.info(f"Loading checkpoint: {resume_path} ...")
         checkpoint = torch.load(resume_path, self.device, weights_only=False)
         self.start_epoch = checkpoint["epoch"] + 1
+        self.completed_steps = checkpoint.get(
+            "completed_steps", checkpoint["epoch"] * self.epoch_len
+        )
         if checkpoint["config"]["trainer"].get("monitor") == self.monitor:
             self.mnt_best = checkpoint["monitor_best"]
 

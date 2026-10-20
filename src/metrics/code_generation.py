@@ -13,22 +13,28 @@ class _TokenMetric(BaseMetric):
         super().__init__(name=name)
         self.ignore_index = ignore_index
 
-    def weight(self, labels, **batch):
-        return labels.ne(self.ignore_index).sum().item()
+    def weight(self, labels, token_count=None, **batch):
+        return (
+            token_count
+            if token_count is not None
+            else labels.ne(self.ignore_index).sum().item()
+        )
 
 
 class TokenAccuracy(_TokenMetric):
     @torch.no_grad()
-    def __call__(self, logits, labels, **batch):
+    def __call__(self, logits, labels, token_count=None, **batch):
         valid = labels.ne(self.ignore_index)
         correct = (logits.argmax(-1).eq(labels) & valid).sum().item()
-        count = self.weight(labels)
+        count = self.weight(labels, token_count=token_count)
         return correct / count if count else 0.0
 
 
 class Perplexity(_TokenMetric):
     @torch.no_grad()
-    def _mean_nll(self, logits, labels):
+    def _mean_nll(self, logits, labels, mean_nll=None):
+        if mean_nll is not None:
+            return float(mean_nll)
         # Plain NLL, independent of label smoothing in the training loss.
         return F.cross_entropy(
             logits.float().flatten(0, 1),
@@ -36,12 +42,16 @@ class Perplexity(_TokenMetric):
             ignore_index=self.ignore_index,
         ).item()
 
-    def __call__(self, logits, labels, **batch):
-        return self.compute(self._mean_nll(logits, labels))
+    def __call__(self, logits, labels, mean_nll=None, **batch):
+        return self.compute(self._mean_nll(logits, labels, mean_nll))
 
-    def update(self, tracker, logits, labels, **batch):
+    def update(self, tracker, logits, labels, mean_nll=None, token_count=None, **batch):
         # Average NLL across tokens first; averaging batch perplexities is wrong.
-        tracker.update(self.name, self._mean_nll(logits, labels), n=self.weight(labels))
+        tracker.update(
+            self.name,
+            self._mean_nll(logits, labels, mean_nll),
+            n=self.weight(labels, token_count=token_count),
+        )
 
     def compute(self, average):
         try:

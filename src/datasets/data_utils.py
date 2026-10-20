@@ -1,7 +1,9 @@
 from itertools import repeat
 
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
+from src.datasets.batching import LengthGroupedBatchSampler
 from src.utils.init_utils import set_worker_seed
 
 
@@ -77,13 +79,29 @@ def get_dataloaders(config, device):
                 f"be larger than the training dataset length ({len(dataset)})"
             )
 
+        loader_config = OmegaConf.to_container(config.dataloader, resolve=True)
+        if loader_config.get("num_workers", 0) == 0:
+            loader_config["persistent_workers"] = False
+        batching = config.get("batching", {})
+        if dataset_partition == "train" and batching.get("enabled", False):
+            batch_sampler = LengthGroupedBatchSampler(
+                dataset,
+                batch_size=loader_config.pop("batch_size"),
+                pool_batches=batching.get("pool_batches", 64),
+                seed=config.trainer.seed,
+            )
+            batching_args = {"batch_sampler": batch_sampler}
+        else:
+            batching_args = {
+                "drop_last": dataset_partition == "train",
+                "shuffle": dataset_partition == "train",
+            }
         partition_dataloader = instantiate(
-            config.dataloader,
+            loader_config,
             dataset=dataset,
             collate_fn=batch_collate,
-            drop_last=(dataset_partition == "train"),
-            shuffle=(dataset_partition == "train"),
             worker_init_fn=set_worker_seed,
+            **batching_args,
         )
         dataloaders[dataset_partition] = partition_dataloader
 
