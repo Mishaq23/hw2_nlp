@@ -1,0 +1,5 @@
+_target_: src.utils.lr_scheduler.WarmupCosineLR
+T_max: null # train.py sets the full budget, including warmup
+warmup_steps: 1000
+warmup_start_lr: 3.0e-6
+eta_min: 3.0e-6

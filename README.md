@@ -281,6 +281,19 @@ disables numbered periodic files while retaining last and best checkpoints.
 The exact old dataloader position is not restored; the new shuffle/grouping
 changes which examples are presented first.
 
+`exp10_finetune` continues a full best checkpoint with 85,000 additional updates
+and a new 4.8-million-row sample across all source shards (sampling seed 43).
+Set `trainer.finetune_from` to the source checkpoint and
+`data_preparation.reuse_from` to its prepared directory. Use a new
+`TINYSMS_DATA_DIR` for the larger sample. The model, tokenizer and exact validation
+split are preserved. `cosine_warmup` starts at `warmup_start_lr`, reaches the
+optimizer's peak LR (5e-5) after 1,000 updates, then decays to 3e-6 by update
+85,000. Optimizer moments are restored while the schedule starts anew.
+Batch size remains 32, FP32; the training time limit is 9.5 hours. When preparing
+data in the same Kaggle notebook, finish preparation first and subtract elapsed
+notebook time from the training allowance, leaving time for final evaluation,
+inference and export. The step budget is a maximum, not a completion guarantee.
+
 With zero label smoothing, perplexity reuses the already computed cross-entropy;
 with smoothing it still computes plain NLL separately. Comet additionally logs
 `train_steps_per_sec_train`, `target_tokens_per_sec_train`,

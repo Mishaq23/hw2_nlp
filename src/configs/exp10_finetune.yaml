@@ -1,0 +1,27 @@
+defaults:
+  - exp09_finetune
+  - override /lr_scheduler: cosine_warmup
+  - _self_
+
+writer:
+  run_name: exp10_finetune51m_b32_85k_4800k
+
+data_preparation:
+  enabled: true
+  reuse_from: ??? # exp09 prepared directory: preserve tokenizer and exact validation
+  sampling:
+    max_rows: 4800000
+    seed: 43
+
+trainer:
+  n_epochs: 170 # 85,000 additional optimizer updates
+  max_train_seconds: 34200 # 9.5 hours; Kaggle cell also accounts for preparation
+  seed: 3
+
+optimizer:
+  lr: 5.0e-5 # peak after warmup; do not halve the source checkpoint LR
+
+lr_scheduler:
+  warmup_steps: 1000
+  warmup_start_lr: 3.0e-6 # Kaggle cell can use the lower source checkpoint LR
+  eta_min: 3.0e-6
