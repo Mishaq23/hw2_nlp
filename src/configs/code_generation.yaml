@@ -36,6 +36,7 @@ trainer:
   device: auto
   override: false
   save_period: 5
+  save_last_every_n_epochs: 0 # optional rolling checkpoint, without numbered copies
   early_stop: ${trainer.n_epochs}
   save_dir: saved
   seed: 1
@@ -43,6 +44,7 @@ trainer:
 batching:
   enabled: false
   pool_batches: 64
+  max_tokens: null # batch_size * (padded max source + padded max target)
 
 compile:
   enabled: false

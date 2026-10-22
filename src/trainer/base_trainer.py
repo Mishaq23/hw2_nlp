@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from pathlib import Path
 from time import perf_counter
 
 import torch
@@ -93,6 +94,7 @@ class BaseTrainer:
         self.start_epoch = 1
         self.epochs = self.cfg_trainer.n_epochs
         self.completed_steps = 0
+        self.completed_examples = 0
         self._time_limit_reached = False
         self._training_deadline = None
 
@@ -186,10 +188,14 @@ class BaseTrainer:
             self._training_deadline = perf_counter() + max(0, float(seconds))
         try:
             self._train_process()
-        except KeyboardInterrupt as e:
-            self.logger.info("Saving model on keyboard interrupt")
-            self._save_checkpoint(self._last_epoch, save_best=False)
-            raise e
+        except (KeyboardInterrupt, torch.cuda.OutOfMemoryError):
+            self.logger.exception("Training interrupted; saving checkpoint-last.")
+            self.optimizer.zero_grad(set_to_none=True)
+            try:
+                self._save_checkpoint(self._last_epoch, save_last=True)
+            except Exception:
+                self.logger.exception("Could not save the interrupted checkpoint.")
+            raise
 
     def _train_process(self):
         """
@@ -228,6 +234,10 @@ class BaseTrainer:
 
             if (self.save_period and epoch % self.save_period == 0) or best:
                 self._save_checkpoint(epoch, save_best=best, only_best=True)
+
+            last_every = self.cfg_trainer.get("save_last_every_n_epochs", 0)
+            if last_every and epoch % last_every == 0:
+                self._save_checkpoint(epoch, save_last=True)
 
             if stop_process or self._time_limit_reached:
                 break
@@ -278,6 +288,7 @@ class BaseTrainer:
                     raise e
 
             self.completed_steps += 1
+            self.completed_examples += batch["labels"].size(0)
             target_tokens += batch.get("token_count", 0)
             if (
                 self._training_deadline is not None
@@ -314,9 +325,15 @@ class BaseTrainer:
             train_steps_per_sec=(self.completed_steps - steps_before) / elapsed,
             target_tokens_per_sec=target_tokens / elapsed,
             completed_steps=self.completed_steps,
+            completed_examples=self.completed_examples,
         )
         self.writer.set_step(self.completed_steps)
-        for name in ("train_seconds", "train_steps_per_sec", "target_tokens_per_sec"):
+        for name in (
+            "train_seconds",
+            "train_steps_per_sec",
+            "target_tokens_per_sec",
+            "completed_examples",
+        ):
             self.writer.add_scalar(name, logs[name])
         if self._time_limit_reached:
             self.logger.info(
@@ -531,6 +548,12 @@ class BaseTrainer:
     def _restore_checkpoint_metadata(self, checkpoint):
         pass
 
+    @staticmethod
+    def _write_checkpoint(state, path):
+        temporary = Path(str(path) + ".tmp")
+        torch.save(state, temporary)
+        temporary.replace(path)
+
     def _save_checkpoint(
         self, epoch, save_best=False, only_best=False, save_last=False
     ):
@@ -554,18 +577,19 @@ class BaseTrainer:
             "monitor_best": self.mnt_best,
             "config": self.config,
             "completed_steps": self.completed_steps,
+            "completed_examples": self.completed_examples,
             **self._checkpoint_metadata(),
         }
         name = "checkpoint-last.pth" if save_last else f"checkpoint-epoch{epoch}.pth"
         filename = str(self.checkpoint_dir / name)
         if not (only_best and save_best):
-            torch.save(state, filename)
+            self._write_checkpoint(state, filename)
             if self.config.writer.log_checkpoints:
                 self.writer.add_checkpoint(filename, str(self.checkpoint_dir.parent))
             self.logger.info(f"Saving checkpoint: {filename} ...")
         if save_best:
             best_path = str(self.checkpoint_dir / "model_best.pth")
-            torch.save(state, best_path)
+            self._write_checkpoint(state, best_path)
             if self.config.writer.log_checkpoints:
                 self.writer.add_checkpoint(best_path, str(self.checkpoint_dir.parent))
             self.logger.info("Saving current best: model_best.pth ...")
@@ -589,6 +613,7 @@ class BaseTrainer:
         self.completed_steps = checkpoint.get(
             "completed_steps", checkpoint["epoch"] * self.epoch_len
         )
+        self.completed_examples = checkpoint.get("completed_examples", 0)
         if checkpoint["config"]["trainer"].get("monitor") == self.monitor:
             self.mnt_best = checkpoint["monitor_best"]
 

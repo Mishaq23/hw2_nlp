@@ -277,7 +277,7 @@ class Trainer(BaseTrainer):
                 path = self.checkpoint_dir / f"model_best_{name}.pth"
                 # These files are for inference; optimizer state stays in the
                 # regular model_best/periodic training checkpoints.
-                torch.save(
+                self._write_checkpoint(
                     {
                         "state_dict": self.model.state_dict(),
                         "epoch": logs["epoch"],

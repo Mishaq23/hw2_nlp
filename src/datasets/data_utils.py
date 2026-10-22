@@ -89,6 +89,10 @@ def get_dataloaders(config, device):
                 batch_size=loader_config.pop("batch_size"),
                 pool_batches=batching.get("pool_batches", 64),
                 seed=config.trainer.seed,
+                max_tokens=batching.get("max_tokens"),
+                pad_to_multiple_of=loader_config["collate_fn"].get(
+                    "pad_to_multiple_of", 1
+                ),
             )
             batching_args = {"batch_sampler": batch_sampler}
         else:

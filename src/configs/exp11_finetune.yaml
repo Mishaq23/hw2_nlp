@@ -1,0 +1,33 @@
+defaults:
+  - exp09_finetune
+  - override /lr_scheduler: cosine_warmup
+  - _self_
+
+writer:
+  run_name: exp11a_lr1e5_20k
+
+data_preparation:
+  enabled: false # reuse tinysms_all60_4800k from exp10 Output
+  sampling:
+    max_rows: 4800000
+    seed: 43
+
+trainer:
+  n_epochs: 40 # 20,000 additional updates; complete the LR decay
+  seed: 4 # use the same order for A and B
+  max_train_seconds: 9000 # 2.5 hours; notebook also reserves export/inference time
+  save_last_every_n_epochs: 1
+
+optimizer:
+  lr: 1.0e-5 # variant B: override to 2e-5, starting from the same source checkpoint
+
+lr_scheduler:
+  warmup_steps: 500
+  warmup_start_lr: 1.0e-6
+  eta_min: 1.0e-6
+
+dataloader:
+  batch_size: 24 # maximum; long sequences get smaller batches
+
+batching:
+  max_tokens: 4096

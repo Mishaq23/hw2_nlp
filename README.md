@@ -294,6 +294,29 @@ data in the same Kaggle notebook, finish preparation first and subtract elapsed
 notebook time from the training allowance, leaving time for final evaluation,
 inference and export. The step budget is a maximum, not a completion guarantee.
 
+`exp11_finetune` tests a smaller LR from the same best checkpoint with existing
+4.8-million-row prepared data: 20,000 additional updates, peak LR 1e-5, 500-step
+warmup from 1e-6, then cosine to 1e-6. Variant B overrides `optimizer.lr=2e-5`
+and uses a new run name while keeping the same source checkpoint and seed 4.
+The maximum batch size is 24. `batching.max_tokens=4096` bounds each batch's
+padded source-plus-target token count, accounting for padding to multiples of 8.
+Long sequences use smaller batches, with no truncation or accumulation; token
+budget mode retains the final small batches. An individually oversized example
+is processed alone, so the budget cannot guarantee that every example fits.
+`completed_examples` records actual presentations rather than assuming 24 per
+update. Lower batch size changes the optimization setup relative to exp10,
+but A and B use the same batch sequence for comparison.
+
+`trainer.save_last_every_n_epochs=1` keeps a rolling full last checkpoint.
+Best, last and per-decoding checkpoints are written through temporary files
+before replacing the previous file. Catchable CUDA OOM and KeyboardInterrupt
+also attempt to save last, without replacing best. Hard process termination
+cannot run this handler. Full checkpoints include weights, optimizer, scheduler
+and actual step/example counters; per-decoding checkpoints contain inference
+weights. Keep the full last file for further training. A fresh stage with
+`finetune_from` resets the schedule and data order; it is not an exact replay of
+the saved run's RNG and dataloader position.
+
 With zero label smoothing, perplexity reuses the already computed cross-entropy;
 with smoothing it still computes plain NLL separately. Comet additionally logs
 `train_steps_per_sec_train`, `target_tokens_per_sec_train`,
