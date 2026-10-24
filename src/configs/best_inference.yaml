@@ -1,0 +1,13 @@
+defaults:
+  - code_generation_inference
+  - _self_
+
+dataloader:
+  batch_size: 16
+
+inferencer:
+  checkpoint_dir: saved/best_stage2
+  generation:
+    num_beams: 1
+    length_penalty: 1.0
+    max_new_tokens: 1024

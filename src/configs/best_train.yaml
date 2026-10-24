@@ -1,0 +1,53 @@
+# Stage 1 of the best confirmed result: train the exp08 architecture from scratch.
+defaults:
+  - code_generation
+  - override /writer: cometml
+  - _self_
+
+writer:
+  run_name: best_stage1
+  mode: disabled # no Comet account or API key is required
+
+model:
+  d_model: 512
+  d_ff: 2048
+  n_heads: 8
+  n_encoder_layers: 5
+  n_decoder_layers: 5
+  activation: swiglu
+  dropout: 0.1
+  attention_dropout: 0.1
+
+trainer:
+  # The source checkpoint LR corresponds to 57,500 updates of the original schedule.
+  n_epochs: 115
+  epoch_len: 500
+  save_period: 0 # keep best and last; do not create numbered checkpoint copies
+  monitor: max val_pass_at_1
+  skip_oom: false
+
+dataloader:
+  batch_size: 32
+  num_workers: 2
+
+data_preparation:
+  sampling:
+    max_rows: 2400000
+    seed: 42
+  split:
+    validation_fraction: 0.0025
+    seed: 42
+    num_proc: 2
+
+lr_scheduler:
+  # Preserve exp08's original cosine curve when stopping at the source checkpoint.
+  T_max: 85000
+
+generation_validation:
+  num_beams: [1]
+  length_penalty: 1.0
+  batch_size: 16
+  max_examples: 512
+  seed: 42
+  every_n_epochs: 5
+  max_new_tokens: 1024

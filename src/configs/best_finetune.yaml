@@ -1,0 +1,41 @@
+# Stage 2: continue the stage-1 best with the settings used for public pass@1=61.77%.
+defaults:
+  - best_train
+  - _self_
+
+writer:
+  run_name: best_stage2
+  mode: disabled
+
+trainer:
+  finetune_from: ${trainer.save_dir}/best_stage1/model_best.pth
+  restore_optimizer: true
+  n_epochs: 60
+  epoch_len: 500
+  save_period: 0
+  validate_before_training: true
+  validation_every_n_epochs: 5
+  max_train_seconds: 32400
+  seed: 2
+
+data_preparation:
+  enabled: false
+
+optimizer:
+  lr: 3.666241190635664e-5 # actual initial LR of the best confirmed finetuning run
+
+lr_scheduler:
+  T_max: 30000
+  eta_min: 3.0e-6
+
+dataloader:
+  persistent_workers: true
+  collate_fn:
+    pad_to_multiple_of: 8
+
+batching:
+  enabled: true
+  pool_batches: 64
+
+compile:
+  enabled: true
